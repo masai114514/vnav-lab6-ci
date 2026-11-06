@@ -26,6 +26,7 @@
 import argparse
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -106,6 +107,13 @@ def main():
     ap.add_argument('--rate', type=float, default=10.0, help='发布频率 (Hz)')
     ap.add_argument('--stride', type=int, default=1)
     ap.add_argument('--max-frames', type=int, default=0)
+    # 两个硬上限。没有它们，CI 会一直挂在这里：
+    # 节点崩掉之后没有任何订阅者，get_num_connections() 永远是 0，
+    # 下面的等待循环就变成一个死循环（Run #6 挂了 47 分钟就是这么来的）。
+    ap.add_argument('--wait-subscribers', type=float, default=45.0,
+                    help='等订阅者的最长秒数，超时直接退出（默认 45）')
+    ap.add_argument('--max-seconds', type=float, default=0.0,
+                    help='整段播放的硬上限；0 = 按 帧数/频率 自动估')
     args, _ = ap.parse_known_args(rospy.myargv()[1:])
 
     rospy.init_node('tum_play', anonymous=True)
@@ -120,15 +128,29 @@ def main():
     pairs = associate(rgb, depth)[::args.stride]
     if args.max_frames:
         pairs = pairs[:args.max_frames]
-    rospy.loginfo('tum_play: %d frames from %s', len(pairs), args.data)
+    if args.max_seconds <= 0:
+        # 1.6 倍余量 + 120 s 启动余量：801 帧 @8 Hz ≈ 100 s → 上限约 280 s
+        args.max_seconds = len(pairs) / max(args.rate, 1e-3) * 1.6 + 120.0
+    rospy.loginfo('tum_play: %d frames from %s (上限 %.0f s)',
+                  len(pairs), args.data, args.max_seconds)
 
     rate = rospy.Rate(args.rate)
-    # 等订阅者连上
+    # 等订阅者连上（有上限：节点崩了就没人订阅，不能死等）
+    t_wait = time.time()
     while pub_rgb.get_num_connections() == 0 and not rospy.is_shutdown():
+        if time.time() - t_wait > args.wait_subscribers:
+            rospy.logerr('tum_play: %.0f s 内没有订阅者 —— 节点多半已经崩了，'
+                         '去 out/smoke.log 或 out/run_*.log 找栈', args.wait_subscribers)
+            return 2
         rate.sleep()
 
+    t0 = time.time()
     for idx, (ts, rgb_rel, depth_rel) in enumerate(pairs):
         if rospy.is_shutdown():
+            break
+        if time.time() - t0 > args.max_seconds:
+            rospy.logwarn('tum_play: 到达 max-seconds=%.0f s，提前停止（%d/%d）',
+                          args.max_seconds, idx, len(pairs))
             break
         img = cv2_imread(os.path.join(args.data, rgb_rel), True)
         dep = cv2_imread(os.path.join(args.data, depth_rel), False)
@@ -175,6 +197,7 @@ def main():
 
     rospy.loginfo('tum_play: done, waiting for the node to flush ...')
     rospy.sleep(2.0)
+    return 0
 
 
 def cv2_imread(path, color):
@@ -223,4 +246,4 @@ def Q_from_R(R):
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

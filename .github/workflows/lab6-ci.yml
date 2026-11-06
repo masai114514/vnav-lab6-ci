@@ -89,6 +89,10 @@ jobs:
 
       - name: 主流程（编译 + 四个估计器 + 汇总）
         shell: bash
+        # 70 分钟：比 job 的 90 分钟短，超时只砍这一步，后面的 cache/save 还能跑，
+        # 下一趟不用再从头编 OpenCV。（Run #6 挂了 47 分钟，job 级超时到 90 分钟
+        # 才动手，那时 cachesave 全被跳过，白亏一次 20 分钟编译。）
+        timeout-minutes: 70
         run: |
           set -o pipefail
           mkdir -p out

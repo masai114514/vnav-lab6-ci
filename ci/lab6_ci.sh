@@ -138,6 +138,17 @@ wait_node() {
   return 1
 }
 
+# 给外部命令套一层硬超时。用 INT 而不是 TERM：rosnode / catkin 收到 INT 会走
+# 正常收尾，日志才留得下来；20 s 还不退才 KILL。
+#
+# 为什么必须有它：Run #6 里 tum_play 的「等订阅者」是个死循环（节点崩了就永远
+# 没有订阅者），冒烟阶段又是前台调用，整个 job 从 8 分钟直接挂到 47 分钟。
+# 任何可能无限等待的外部命令都要经过这里。
+tmo() {
+  local lim="$1"; shift
+  timeout --signal=INT --kill-after=20 "$lim" "$@"
+}
+
 # =============================================================================
 # S1 环境信息
 # =============================================================================
@@ -283,7 +294,8 @@ s_build_deps() {
   # 不用 `set -e` 直接中断：glog 挂了也要把 OpenCV 编完（它是 20 分钟的大头），
   # 后面再用 shim 兜 glog，这样下一趟缓存还能命中。
   local rc_deps=0
-  catkin build -j"$(nproc)" --no-status --summarize || rc_deps=$?
+  # 2400 s 上限：OpenCV 那 20 分钟本来就慢，但不能无限等（编译卡死也要留证据）
+  tmo 2400 catkin build -j"$(nproc)" --no-status --summarize || rc_deps=$?
   cd "$ROOT"
 
   # ---------- 校验四个依赖真的产出了 CMake config ----------
@@ -418,13 +430,13 @@ s_build_main() {
   catkin config --extend "$WS_DEPS/install" \
     --cmake-args -DCMAKE_BUILD_TYPE=Release
   # 顺序有讲究：cv_bridge 要在 lab_6 之前，opengv 要在 lab_6 之前
-  catkin build cv_bridge  -j"$(nproc)" --no-status || true
-  catkin build eigen_catkin -j"$(nproc)" --no-status || true
+  tmo 900 catkin build cv_bridge  -j"$(nproc)" --no-status || true
+  tmo 900 catkin build eigen_catkin -j"$(nproc)" --no-status || true
 
   local rc_opengv=0
-  catkin build opengv -j"$(nproc)" --no-status --summarize || rc_opengv=$?
+  tmo 1200 catkin build opengv -j"$(nproc)" --no-status --summarize || rc_opengv=$?
   local rc_build=0
-  catkin build lab_5 lab_6 -j"$(nproc)" --no-status --summarize || rc_build=$?
+  tmo 900 catkin build lab_5 lab_6 -j"$(nproc)" --no-status --summarize || rc_build=$?
   cd "$ROOT"
 
   say "---------- 编译产物 ----------"
@@ -480,7 +492,8 @@ s_data() {
   fi
   mkdir -p "$ROOT/data"
   for i in 1 2 3; do
-    if curl -fsSL --retry 2 --max-time 900 -o "$ROOT/data/tum.tgz" "$TUM_URL"; then
+    # 460 MB，450 s 够用；三次重试最多 22 分钟，不再是 45 分钟
+    if curl -fsSL --retry 2 --max-time 450 -o "$ROOT/data/tum.tgz" "$TUM_URL"; then
       break
     fi
     warn "下载失败（第 $i 次），重试"
@@ -528,15 +541,45 @@ s_smoke() {
       /rgb_images_topic:=/tesse/left_cam/rgb/image_raw \
       /depth_images_topic:=/tesse/depth_cam/mono/image_raw >> "$log" 2>&1 &
   local gpid=$!
-  sleep 5
-  python "$ROOT/ci/tum_play.py" --data "$DATA" --rate 10 --max-frames 12 >> "$log" 2>&1 || true
-  wait_node "$gpid" 150 || true
+  sleep 3
+
+  # 播 12 帧就够触发启动路径。三个上限缺一不可：等订阅者 25 s（节点崩了就没有
+  # 订阅者）、外部 timeout 180 s、节点用 wait_node 兜底。否则这里会永久挂住。
+  local play_rc=0
+  tmo 180 python "$ROOT/ci/tum_play.py" --data "$DATA" --rate 10 \
+      --max-frames 12 --wait-subscribers 25 >> "$log" 2>&1 || play_rc=$?
+
+  # 关键诊断：节点还在不在。之前 47 分钟的挂起就是因为没人问这一句。
+  if kill -0 "$gpid" 2>/dev/null; then
+    say "冒烟：节点仍在运行（tum_play rc=$play_rc）"
+  else
+    warn "冒烟：节点已经退出（tum_play rc=$play_rc）—— 不再等待，直接取栈"
+  fi
+  # 没有订阅者 / tum_play 超时的时候，把 ROS 图的状态也留下来
+  if [ "$play_rc" -ne 0 ]; then
+    {
+      echo "---------- rosnode list ----------"
+      rosnode list 2>&1 || true
+      echo "---------- rosnode info /lab_6 ----------"
+      rosnode info /lab_6 2>&1 | head -40 || true
+      echo "---------- rostopic info ----------"
+      rostopic info /tesse/left_cam/rgb/image_raw 2>&1 | head -20 || true
+    } >> "$log" 2>&1
+  fi
+
+  wait_node "$gpid" 120 || true
   stop_master
 
   echo "---------- smoke.log 关键行 ----------"
   grep -nE "SIGABRT|SIGSEGV|munmap|BACKTRACE|^#[0-9]+ |Aborted|double free" "$log" | head -45 || true
   if grep -qE "SIGABRT|SIGSEGV|double free|munmap_chunk" "$log"; then
     warn "冒烟阶段节点崩溃 —— 完整栈见 out/smoke.log"
+    return 1
+  fi
+  # 没有订阅者 / 播放超时：节点活着但没有 echo 到消息，同样算失败
+  if [ "$play_rc" -ne 0 ]; then
+    warn "冒烟阶段 tum_play 异常退出（rc=$play_rc）—— 节点没在收数据，见 $log"
+    tail -40 "$log" || true
     return 1
   fi
   echo "冒烟通过：节点未崩溃"
@@ -587,14 +630,26 @@ s_run() {
   local node_pid=$!
   sleep 3
 
+  # 播放上限：帧数/频率 × 1.6 + 180 s。tum_play 自己到这个点就停，
+  # wait_node 只当外层兜底 —— 之前这里写死 1200 s，"不动"和"正常播完"
+  # 完全分不出来，一个估计器白等 20 分钟。
+  local nframes play_lim
+  nframes=$(grep -vc '^#' "$DATA/rgb.txt" 2>/dev/null || echo 0)
+  play_lim=$(awk -v n="$nframes" -v r="$rate" 'BEGIN{printf "%d", n/r*1.6+180}')
+  say "估计器 $est：$nframes 帧 @ ${rate} Hz，播放上限 ${play_lim}s"
+
   local py
   py="$(command -v python || command -v python3)"
-  "$py" "$ROOT/ci/tum_play.py" --data "$DATA" --rate "$rate" >> "$log" 2>&1 &
+  "$py" "$ROOT/ci/tum_play.py" --data "$DATA" --rate "$rate" \
+      --max-seconds "$play_lim" >> "$log" 2>&1 &
   local play_pid=$!
-  wait_node "$play_pid" 1200 || true
+  wait_node "$play_pid" "$((play_lim + 120))" || true
 
   # 播完之后给节点 5 s 把最后几帧处理完；它没有"bag 结束"信号，所以要主动收
   sleep 5
+  if ! kill -0 "$node_pid" 2>/dev/null; then
+    warn "节点在播放过程中退出了（估计器 $est）—— 见 $log"
+  fi
   if ! wait_node "$node_pid" 15; then
     warn "节点没自己退出（估计器 $est），已 SIGINT"
   fi

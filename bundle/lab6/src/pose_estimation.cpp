@@ -807,7 +807,12 @@ int main(int argc, char** argv) {
     camera_params_.D = cv::Mat::zeros(cv::Size(5,1),CV_64F);
   } else {
     camera_params_.D = cv::Mat::zeros(cv::Size(static_cast<int>(dist.size()),1), CV_64F);
-    for (size_t i = 0; i < dist.size(); ++i) camera_params_.D.at<double>(i,0) = dist[i];
+    // 注意行列：cv::Size(w,h) = Size(5,1) 造出来是 **1 行 5 列**。
+    // 之前写成 at<double>(i,0)（i=0..4），i≥1 时就写到 data+40*i 去了，
+    // 直接踩坏堆 —— Release 下 at() 不做范围检查，症状是启动后隔几句的
+    // 某个 NodeHandle::hasParam() 报 munmap_chunk(): invalid pointer，
+    // 看起来像是 roscpp 的问题，其实是这里越界。必须是 (0,i)。
+    for (size_t i = 0; i < dist.size(); ++i) camera_params_.D.at<double>(0, i) = dist[i];
   }
 
   local_nh.param("depth_scale", g_depth_scale, g_depth_scale);
