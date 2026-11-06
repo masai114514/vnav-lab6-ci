@@ -39,3 +39,12 @@ target_link_libraries(tracker_shim PRIVATE ${lab_5_LIBRARIES})
 
 add_executable(pose_estimation src/pose_estimation.cpp)
 target_link_libraries(pose_estimation tracker_shim ${catkin_LIBRARIES})
+
+# 崩溃诊断：catkin 会注入 -DCMAKE_BUILD_TYPE=Release（即 -O3 -DNDEBUG），
+# 目标级 flags 追加在最后，所以 -O1 -g 会覆盖 -O3。
+# ENABLE_EXPORTS 等价于链接时的 -rdynamic，把符号放进动态符号表，
+# glog 的 InstallFailureSignalHandler 才能打出函数名而不是 (unknown)。
+set_target_properties(tracker_shim PROPERTIES COMPILE_FLAGS "-g -O1")
+set_target_properties(pose_estimation PROPERTIES
+  COMPILE_FLAGS "-g -O1"
+  ENABLE_EXPORTS ON)

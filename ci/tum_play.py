@@ -154,7 +154,7 @@ def main():
         cam = np.eye(4)
         cam[:3, :3] = quat_to_R(q)
         cam[:3, 3] = t_query[1]
-        body = cam @ T_BODY_CAMERA
+        body = np.dot(cam, T_BODY_CAMERA)   # py2 不支持 @ 运算符，用 np.dot
         odom = Odometry()
         odom.header.stamp = stamp
         odom.header.frame_id = 'world'

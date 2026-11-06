@@ -492,6 +492,56 @@ s_data() {
   echo "frames = $(grep -vc '^#' "$DATA/rgb.txt")"
 }
 
+
+# =============================================================================
+# S5a 冒烟 + 崩溃诊断
+# =============================================================================
+# 用 gdb 跑 5 帧。目的不是出数据，是万一节点在启动阶段崩掉时，
+# 能拿到一份带函数名/行号的栈（glog 的 handler 在缺符号时只打 (unknown)）。
+s_smoke() {
+  need_bin "$WS_MAIN/devel/lib/lab_6/pose_estimation" || return 1
+  if ! command -v gdb >/dev/null 2>&1; then
+    apt-get install -y gdb >/dev/null 2>&1 || warn "gdb 装不上，冒烟会退化成直接运行"
+  fi
+  start_master || return 1
+  set_camera_params
+  # shellcheck disable=SC1090
+  source "$WS_MAIN/devel/setup.bash"
+
+  local log="$OUT/smoke.log"
+  : > "$log"
+  local bin="$WS_MAIN/devel/lib/lab_6/pose_estimation"
+  local runner
+  if command -v gdb >/dev/null 2>&1; then
+    runner=(gdb -batch -ex "set pagination off" -ex "run"
+            -ex "echo \n===== BACKTRACE =====\n" -ex "thread apply all bt 30"
+            --args "$bin")
+  else
+    runner=("$bin")
+  fi
+
+  "${runner[@]}" \
+      __name:=lab_6 \
+      _pose_estimator:=0 _use_ransac:=true _max_frames:=5 \
+      _csv_path:="$OUT/smoke.csv" \
+      /ground_truth_pose:=/tesse/odom \
+      /rgb_images_topic:=/tesse/left_cam/rgb/image_raw \
+      /depth_images_topic:=/tesse/depth_cam/mono/image_raw >> "$log" 2>&1 &
+  local gpid=$!
+  sleep 5
+  python "$ROOT/ci/tum_play.py" --data "$DATA" --rate 10 --max-frames 12 >> "$log" 2>&1 || true
+  wait_node "$gpid" 150 || true
+  stop_master
+
+  echo "---------- smoke.log 关键行 ----------"
+  grep -nE "SIGABRT|SIGSEGV|munmap|BACKTRACE|^#[0-9]+ |Aborted|double free" "$log" | head -45 || true
+  if grep -qE "SIGABRT|SIGSEGV|double free|munmap_chunk" "$log"; then
+    warn "冒烟阶段节点崩溃 —— 完整栈见 out/smoke.log"
+    return 1
+  fi
+  echo "冒烟通过：节点未崩溃"
+}
+
 # =============================================================================
 # S6 跑四个估计器
 # =============================================================================
@@ -598,6 +648,7 @@ main() {
   stage build_deps s_build_deps
   stage build_main s_build_main
   stage data       s_data
+  stage smoke      s_smoke
   stage run_5pt    s_run_5pt
   stage run_8pt    s_run_8pt
   stage run_2pt    s_run_2pt
