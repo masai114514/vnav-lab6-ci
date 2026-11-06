@@ -1,0 +1,13 @@
+# CI 跑出来的东西（不进仓）
+out/
+ci_runs/
+ws_deps/
+ws_main/
+
+# Python
+__pycache__/
+*.pyc
+
+# 编辑器 / 系统
+.DS_Store
+.vscode/

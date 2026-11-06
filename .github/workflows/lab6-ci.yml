@@ -1,0 +1,181 @@
+name: lab6-ci
+
+# =============================================================================
+# MIT 16.485 VNAV Lab 6 —— 相对位姿估计（5pt / 8pt / 2pt / Arun）无头跑一遍
+#
+# 为什么用 CI 而不是本机：lab6 需要 ROS1(melodic) + OpenCV 3.4.2(含 nonfree 的
+# SIFT) + OpenGV。本机是 macOS，装不了 ROS；队友是 Windows，要 WSL2 + 40 分钟
+# 编译。所以和 lab3/lab4/lab5 一样，把「编译 + 跑数」搬到 GitHub Actions：
+# runner 是原生 x86_64，容器给原版 bionic + ROS melodic，一次编译 ≈25 分钟，
+# 之后命中 OpenCV 缓存只要 8~12 分钟。
+#
+# ⚠️ 容器是 `docker run` 而不是 job 级 `container:`（lab5 踩过的坑，原因照抄）：
+#    GitHub 从 2025-09 起把 JS action 的 runtime 升到 Node 24，要求 glibc ≥ 2.28；
+#    melodic 是 18.04（glibc 2.27），job 级容器里 `actions/checkout` 一上来就死：
+#        /__e/node24/bin/node: version `GLIBC_2.28' not found
+#    解法：action 跑在 host（ubuntu-22.04），只有真正干活那一步 docker run 进容器。
+#
+# 产物：artifact `lab6-results`
+#   out/rpe_{0,1,2,3}.csv  —— 四个估计器的逐帧 RPE（报告里的图就是从这来的）
+#   out/run_*.log          —— 每个估计器的完整节点日志
+#   out/build_evidence.txt —— 编译器 / OpenCV / opengv / ldd 证据
+#   out/report.md          —— 汇总
+# =============================================================================
+on:
+  workflow_dispatch:
+  push:
+    branches: ['**']
+    paths:
+      - 'bundle/**'
+      - 'ci/**'
+      - 'data/**'
+      - '.github/workflows/lab6-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'bundle/**'
+      - 'ci/**'
+      - 'data/**'
+
+permissions:
+  contents: read
+  actions: write          # 删同名缓存条目需要
+
+concurrency:
+  group: lab6-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ROS_IMAGE: ros:melodic-ros-base
+
+jobs:
+  lab6:
+    name: 编译 + 跑 lab6 四个估计器（melodic 容器）
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 依赖工作区：OpenCV 3.4.2 + contrib(裁剪) + glog/gflags/catkin_simple
+      # 用 cache/restore + cache/save 拆开：编了 25 分钟之后哪怕后面的 stage 挂了，
+      # 也要把 OpenCV 存下来（`actions/cache` 自带的 post 钩子在 job 失败时不存）。
+      - name: 恢复 OpenCV 依赖缓存
+        id: deps-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ws_deps/install
+          key: deps-melodic-nonfree-v1-${{ hashFiles('bundle/dependencies/opencv3_catkin/CMakeLists.txt') }}
+          restore-keys: |
+            deps-melodic-nonfree-v1-
+
+      # TUM 序列 460 MB，每趟重下要 2~4 分钟，缓存起来
+      - name: 恢复 TUM 数据集缓存
+        id: data-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/rgbd_dataset_freiburg1_xyz
+          key: tum-fr1-xyz-v1
+
+      - name: 环境信息
+        shell: bash
+        run: |
+          echo "vCPU      = $(nproc)"
+          free -m | awk '/Mem:/{printf "内存      = %s MB\n", $2}'
+          echo "镜像      = $ROS_IMAGE"
+          echo "deps 缓存 = ${{ steps.deps-cache.outputs.cache-hit }}"
+          echo "data 缓存 = ${{ steps.data-cache.outputs.cache-hit }}"
+          df -h . | tail -1
+
+      - name: 主流程（编译 + 四个估计器 + 汇总）
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p out
+          set +e
+          docker run --rm \
+            --user root \
+            -v "$PWD":"$PWD" -w "$PWD" \
+            -e GITHUB_RUN_ID -e GITHUB_SHA -e GITHUB_REF_NAME -e GITHUB_REPOSITORY \
+            "$ROS_IMAGE" \
+            bash ci/lab6_ci.sh
+          rc=$?
+          set -e
+          sudo chown -R "$(id -u):$(id -g)" out ws_deps ws_main data 2>/dev/null || true
+          echo "lab6_ci.sh 退出码 = $rc"
+          exit $rc
+
+      - name: 检查 deps 是否可缓存
+        id: deps-fresh
+        if: always()
+        shell: bash
+        run: |
+          if [ -f out/.deps_fresh ]; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 删除同名旧缓存（可能是半成品）
+        if: always() && steps.deps-fresh.outputs.ok == '1'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CACHE_KEY: deps-melodic-nonfree-v1-${{ hashFiles('bundle/dependencies/opencv3_catkin/CMakeLists.txt') }}
+        run: |
+          ids=$(gh api "repos/$GITHUB_REPOSITORY/actions/caches?key=$CACHE_KEY" \
+                  --jq '.actions_caches[].id' 2>/dev/null || true)
+          for id in $ids; do
+            echo "删除旧缓存条目 id=$id"
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" || true
+          done
+
+      - name: 保存 OpenCV 依赖缓存
+        if: always() && steps.deps-fresh.outputs.ok == '1'
+        uses: actions/cache/save@v4
+        with:
+          path: ws_deps/install
+          key: deps-melodic-nonfree-v1-${{ hashFiles('bundle/dependencies/opencv3_catkin/CMakeLists.txt') }}
+
+      - name: 保存 TUM 数据集缓存
+        if: always() && hashFiles('data/rgbd_dataset_freiburg1_xyz/rgb.txt') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: data/rgbd_dataset_freiburg1_xyz
+          key: tum-fr1-xyz-v1
+
+      - name: 上传产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lab6-results
+          path: |
+            out/*.csv
+            out/*.log
+            out/*.txt
+            out/report.md
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: 结论摘要
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## LAB6 运行摘要"
+            echo
+            echo "- 依赖缓存：\`${{ steps.deps-cache.outputs.cache-hit }}\`"
+            echo "- 数据集缓存：\`${{ steps.data-cache.outputs.cache-hit }}\`"
+            echo "- 镜像：\`$ROS_IMAGE\`"
+            echo
+            if [ -f out/report.md ]; then
+              sed -n '1,80p' out/report.md
+            else
+              echo "_没有 out/report.md_"
+            fi
+            echo
+            echo "### 产物"
+            echo '```'
+            ls -la out/ 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

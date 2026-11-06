@@ -1,0 +1,26 @@
+<launch>
+  <!-- (OPTIONAL) Put in the path to the dataset as a default value for the argument -->
+  <arg name="path_to_dataset" />
+  <arg name="descriptor" default="SIFT" />
+
+  <!-- 同 two_frames_tracking.launch：可视化落盘目录 + 是否开窗口。
+       LK 模式的轨迹图存在 <output_dir>/lk_tracks_%04d.png，每隔
+       lk_save_every 帧一张（0 = 关闭）。 -->
+  <arg name="output_dir" default="lab5_output" />
+  <arg name="interactive" default="true" />
+  <arg name="lk_save_every" default="20" />
+
+  <node name="lab_5" pkg="lab_5" type="track_features" output="screen">
+    <param name="img1_path" type="string" value="$(find lab_5)/images/box.png"/>
+    <param name="img2_path" type="string" value="$(find lab_5)/images/box_in_scene.png"/>
+    <param name="mode" type="int" value="1"/>
+    <param name="descriptor" type="string" value="$(arg descriptor)"/>
+    <param name="output_dir" type="string" value="$(arg output_dir)"/>
+    <param name="interactive" type="bool" value="$(arg interactive)"/>
+    <param name="lk_save_every" type="int" value="$(arg lk_save_every)"/>
+
+    <remap from="/images_topic" to="/camera/color/image_raw"/>
+  </node>
+  <node name="rosbag" pkg="rosbag" type="play" output="screen"
+  args="--clock $(arg path_to_dataset)  /tesse/left_cam/rgb/image_raw:=/camera/color/image_raw" />
+</launch>
