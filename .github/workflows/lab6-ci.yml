@@ -157,6 +157,7 @@ jobs:
             out/*.csv
             out/*.log
             out/*.txt
+            out/fig/*.png
             out/report.md
           retention-days: 14
           if-no-files-found: warn

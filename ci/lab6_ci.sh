@@ -582,7 +582,18 @@ s_smoke() {
     tail -40 "$log" || true
     return 1
   fi
-  echo "冒烟通过：节点未崩溃"
+  # 冒烟还要证明"真的算出了位姿"：只要有一行 RPE 就说明
+  # 跟踪 → 去畸变 → RANSAC → RPE → 写 CSV 整条链通了。
+  # 只看"没崩"是不够的：Run #7 里节点安静地 rc=1 退出，冒烟却判了 PASS。
+  local srows=0
+  [ -f "$OUT/smoke.csv" ] && srows=$(($(wc -l < "$OUT/smoke.csv") - 1))
+  echo "smoke csv rows = $srows"
+  if [ "$srows" -lt 1 ]; then
+    warn "冒烟阶段没有写出任何 RPE 行 —— 节点大概启动后就退了，见 $log"
+    tail -40 "$log" || true
+    return 1
+  fi
+  echo "冒烟通过：节点未崩溃，且已写出 $srows 行 RPE"
 }
 
 # =============================================================================
@@ -598,6 +609,13 @@ set_camera_params() {
   rosparam set /lab_6/depth_scale 5000.0
   rosparam set /lab_6/min_depth 0.30
   rosparam set /lab_6/max_depth 8.0
+  # 关键：lab_5 的追踪器在 trackFeatures() 里会 showImage()，而 showImage 读
+  # `~interactive`（默认 true）。CI 没有 X display，namedWindow 一进去就是
+  # Gtk-WARNING "cannot open display"，紧接着整个节点以 rc=1 退出 —— 症状是
+  # 目录里只有 sift_keypoints_img1/2.png、CSV 一行都没有（Run #7 就是这样）。
+  # lab5 的 launch 里也是这么关的，这里必须同样关掉。
+  rosparam set /lab_6/interactive false
+  rosparam set /lab_6/output_dir "$OUT/fig"
 }
 
 s_run() {
@@ -609,6 +627,8 @@ s_run() {
   local csv="$OUT/rpe_${est}.csv"
   local log="$OUT/run_${est}.log"
   : > "$log"
+  # 正式跑不存 PNG：798 帧 × 2 张会让每一步多花几十秒，而且产物不看这些图
+  rosparam set /lab_6/output_dir ""
   # shellcheck disable=SC1090
   source "$WS_MAIN/devel/setup.bash"
 
