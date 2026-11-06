@@ -653,6 +653,12 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
 
         if (ransac.computeModel() && ransac.inliers_.size() >= min_nr_of_correspondences) {
           refineRansacModel(ransac, min_nr_of_correspondences);
+          // ★ 必须把旋转写回真值：TranslationOnlySacProblem::optimizeModelCoefficients
+          // 内部调用的是 relative_pose::optimize_nonlinear(_adapter, inliers)，它优化的是
+          // **完整 6 自由度**，会把适配器里 setR12 给定的真值旋转一起改掉。
+          // CI 实测：不写回时 2 点法的旋转误差是 0.435°（本应恒为 0），写回后是 0.000°。
+          // 2 点法的定义就是"旋转已知、只估平移"，所以精化只能用在 t 上。
+          ransac.model_coefficients_.block<3, 3>(0, 0) = rotation;
           relative_pose_estimate = eigen2Pose(ransac.model_coefficients_);
           g_num_inliers = static_cast<int>(ransac.inliers_.size());
         } else {
