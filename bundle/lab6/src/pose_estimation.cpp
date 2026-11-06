@@ -109,7 +109,7 @@ using Adapter = opengv::relative_pose::CentralRelativeAdapter;
 using RansacProblemGivenRot = opengv::sac_problems::relative_pose::TranslationOnlySacProblem;
 using AdapterGivenRot = opengv::relative_pose::CentralRelativeAdapter;
 using Adapter3D = opengv::point_cloud::PointCloudAdapter;
-using RansacProblem3D = opengv::point_cloud::PointCloudSacProblem;
+using RansacProblem3D = opengv::sac_problems::point_cloud::PointCloudSacProblem;
 
 // Global variables. As a general coding style, global variables are followed
 // by a trailing underscore (Google coding style).
@@ -614,8 +614,10 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
         // 直接取前两个对应点解平移（unrotate=true 表示先用 R12 把第二帧的观测
         // 向量转回第一帧，再解 t）。
         opengv::translation_t const t12 = opengv::relative_pose::twopt(adapter_mono, true);
-        opengv::transformation_t T = opengv::transformation_t::Identity();
-        T.block<3,3>(0,0) = rotation;
+        // transformation_t 是 3x4 的矩阵，Eigen 里对它没有无参 Identity()，
+        // 这里直接把两个块都写满（12 个元素全覆盖，不会留下未初始化项）。
+        opengv::transformation_t T;
+        T.block<3, 3>(0, 0) = rotation;
         T.col(3) = t12;
         relative_pose_estimate = eigen2Pose(T);
 
