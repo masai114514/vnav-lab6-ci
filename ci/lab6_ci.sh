@@ -191,6 +191,7 @@ s_apt() {
     libjpeg-dev libpng-dev libtiff-dev \
     libavcodec-dev libavformat-dev libswscale-dev libv4l-dev \
     ros-melodic-cv-bridge ros-melodic-image-transport ros-melodic-rosbag \
+    ros-melodic-tf ros-melodic-tf-conversions ros-melodic-nav-msgs \
     xvfb x11-utils imagemagick ffmpeg 2>&1 | tail -20
 
   say "---------- 关键依赖版本 ----------"
@@ -437,7 +438,10 @@ s_build_main() {
     echo "- ROS: $(. /opt/ros/melodic/setup.bash && echo "$ROS_DISTRO")"
     echo "- gcc: $(gcc -dumpversion)"
     echo "- cmake: $(cmake --version | head -1)"
-    echo "- OpenCV: $(grep -h 'define CV_VERSION ' /usr/include/opencv*/opencv2/core/version.hpp 2>/dev/null | head -1)"
+    echo "- OpenCV: $(grep -h 'define CV_VERSION ' \
+      "$WS_DEPS/install/include/opencv2/core/version.hpp" \
+      /usr/local/include/opencv2/core/version.hpp \
+      /usr/include/opencv*/opencv2/core/version.hpp 2>/dev/null | head -1)"
     echo
     echo "## opengv 状态"
     [ "$rc_opengv" -eq 0 ] && echo "- opengv: 编译成功" || echo "- opengv: 编译失败 (rc=$rc_opengv)"
