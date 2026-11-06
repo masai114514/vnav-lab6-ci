@@ -6,36 +6,51 @@
     1) 相机内参从 Tesse 的 415.69/(360,240) 换成 TUM fr1 的 517.3/(318.6,255.3)，
        并把 TUM 的畸变系数传进去（fr1 有明显桶形畸变）；
     2) 深度是 16UC1、1 单位 = 1/5000 米，靠 depth_scale 换算；
-    3) bag 的话题名与 odom 语义保持一致，因此 remap 不变。
-  office.bag 上仍然用 video_tracking.launch（节点默认内参就是官方值）。
+    3) 数据源不是 rosbag 而是 TUM 的图片序列，由 tum_play.py 按节点期望的
+       话题与消息类型重放（bag_mode=true 时仍可用真 rosbag）。
+
+  参数走 ROS 私有参数（<param>），不用 gflags 命令行——原因见
+  pose_estimation.cpp 里 Options 结构体的注释。
 -->
 <launch>
-  <arg name="bag" default="$(eval env('HOME') + '/data/vnav/tum_office.bag')" />
+  <arg name="data" default="$(env HOME)/data/tum/rgbd_dataset_freiburg1_xyz" />
+  <arg name="bag" default="$(env HOME)/data/vnav/tum_office.bag" />
+  <arg name="bag_mode" default="false" />
   <arg name="pose_estimator" default="0" />
   <arg name="use_ransac" default="true" />
-  <arg name="rate" default="1.0" />
+  <arg name="scale_translation" default="true" />
+  <arg name="rate" default="10.0" />
   <arg name="max_frames" default="0" />
   <arg name="csv_path" default="" />
   <arg name="run_rviz" default="false" />
   <arg name="thr_bearing" default="1e-4" />
   <arg name="thr_3d" default="0.03" />
+  <arg name="ransac_max_iterations" default="2000" />
 
-  <node name="lab_6" pkg="lab_6" type="pose_estimation" output="screen"
-    args="--use_ransac=$(arg use_ransac)
-    --pose_estimator=$(arg pose_estimator)
-    --scale_translation=1
-    --csv_path=$(arg csv_path)
-    --max_frames=$(arg max_frames)
-    --ransac_threshold_bearing=$(arg thr_bearing)
-    --ransac_threshold_3d=$(arg thr_3d)">
+  <node name="lab_6" pkg="lab_6" type="pose_estimation" output="screen">
+    <!-- 估计器与 RANSAC 相关 -->
+    <param name="pose_estimator" value="$(arg pose_estimator)" />
+    <param name="use_ransac" value="$(arg use_ransac)" />
+    <param name="scale_translation" value="$(arg scale_translation)" />
+    <param name="ransac_threshold_bearing" value="$(arg thr_bearing)" />
+    <param name="ransac_threshold_3d" value="$(arg thr_3d)" />
+    <param name="ransac_max_iterations" value="$(arg ransac_max_iterations)" />
+    <param name="refine" value="true" />
+    <param name="max_frames" value="$(arg max_frames)" />
+    <param name="csv_path" value="$(arg csv_path)" />
+
+    <!-- TUM fr1 内参与畸变 -->
     <param name="fx" value="517.306408" />
     <param name="fy" value="516.469215" />
     <param name="cx" value="318.643040" />
     <param name="cy" value="255.313989" />
     <rosparam param="dist">[0.262383, -0.953104, -0.005358, 0.002628, 1.163314]</rosparam>
+
+    <!-- 深度：16UC1、1/5000 米 -->
     <param name="depth_scale" value="5000.0" />
     <param name="min_depth" value="0.3" />
     <param name="max_depth" value="8.0" />
+
     <remap from="/ground_truth_pose" to="/tesse/odom"/>
     <remap from="/rgb_images_topic" to="/tesse/left_cam/rgb/image_raw"/>
     <remap from="/depth_images_topic" to="/tesse/depth_cam/mono/image_raw"/>
@@ -43,5 +58,11 @@
 
   <node if="$(arg run_rviz)" name="viz" pkg="rviz" type="rviz" args="-d $(find lab_6)/rviz/office.rviz" />
 
-  <node name="rosbag" pkg="rosbag" type="play" output="screen" args="--clock -r $(arg rate) $(arg bag)"/>
+  <!-- 数据源二选一：TUM 图片序列（默认）或真 rosbag -->
+  <node unless="$(arg bag_mode)" name="tum_play" pkg="lab_6" type="tum_play.py"
+        output="screen" args="--data $(arg data) --rate $(arg rate)">
+    <param name="depth_scale" value="5000.0" />
+  </node>
+  <node if="$(arg bag_mode)" name="rosbag" pkg="rosbag" type="play"
+        output="screen" args="--clock -r $(arg rate) $(arg bag)" />
 </launch>

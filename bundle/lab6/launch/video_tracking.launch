@@ -16,14 +16,15 @@
   <arg name="thr_bearing" default="1e-4" />
   <arg name="thr_3d" default="0.03" />
 
-  <node name="lab_6" pkg="lab_6" type="pose_estimation" output="screen"
-    args="--use_ransac=$(arg use_ransac)
-    --pose_estimator=$(arg pose_estimator)
-    --scale_translation=1
-    --csv_path=$(arg csv_path)
-    --max_frames=$(arg max_frames)
-    --ransac_threshold_bearing=$(arg thr_bearing)
-    --ransac_threshold_3d=$(arg thr_3d)">
+  <node name="lab_6" pkg="lab_6" type="pose_estimation" output="screen">
+    <!-- 参数走 ROS 私有参数，不用 gflags（原因见 pose_estimation.cpp 里 Options 的注释） -->
+    <param name="pose_estimator" value="$(arg pose_estimator)" />
+    <param name="use_ransac" value="$(arg use_ransac)" />
+    <param name="scale_translation" value="true" />
+    <param name="csv_path" value="$(arg csv_path)" />
+    <param name="max_frames" value="$(arg max_frames)" />
+    <param name="ransac_threshold_bearing" value="$(arg thr_bearing)" />
+    <param name="ransac_threshold_3d" value="$(arg thr_3d)" />
     <remap from="/ground_truth_pose" to="/tesse/odom"/>
     <remap from="/rgb_images_topic" to="/tesse/left_cam/rgb/image_raw"/>
     <remap from="/depth_images_topic" to="/tesse/depth_cam/mono/image_raw"/>

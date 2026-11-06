@@ -15,15 +15,12 @@
 #include <cmath>
 #include <string>
 
-#include <gflags/gflags.h>
 #include <glog/logging.h>
 
 #include <ros/ros.h>
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
 #include <message_filters/sync_policies/approximate_time.h>
-#include <image_transport/image_transport.h>
-#include <image_transport/subscriber_filter.h>
 #include <sensor_msgs/image_encodings.h>
 #include <cv_bridge/cv_bridge.h>
 #include <sensor_msgs/Image.h>
@@ -69,33 +66,28 @@
 //  - Arun's 3 point algorithm (3D-3D correspondences)
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-// These are Google Flags (also known as gflags).
-// Have a look at the provided roslaunch to see how to modify them on the fly.
-// Feel free to use ROS parameters, or command-line flags if you prefer.
-DEFINE_bool(use_ransac, true, "Use Random Sample Consensus.");
-DEFINE_bool(scale_translation, true, "Whether to scale estimated translation to match ground truth scale");
-DEFINE_int32(pose_estimator, 0,
-             "Pose estimation algorithm, valid values are:"
-             "0 for OpengGV's 5-point algorithm."
-             "1 for OpengGV's 8-point algorithm."
-             "2 for OpengGV's 2-point algorithm."
-             "3 for Arun's 3-point method.");
+// Options.
+//
+// 官方骨架用 gflags（Google Flags）传参。我们改成 ROS 私有参数（~xxx），
+// 原因有两个：
+//   1) 与 ROS 生态一致，launch 文件里写 <param> 就能改，不必拼命令行；
+//   2) 实测在 melodic 下 gflags 的全局 std::string（DEFINE_string）与 roscpp
+//      的 std::string 跨库传递会把堆踩坏，启动后第一次 ros::NodeHandle::hasParam()
+//      就 munmap_chunk(): invalid pointer 崩掉。用 param 可以完全避开。
+struct Options {
+  bool use_ransac = true;                 // 是否启用 RANSAC
+  bool scale_translation = true;          // 2D-2D 的平移只有方向，按真值缩放便于统计
+  int pose_estimator = 0;                 // 0: 5pt  1: 8pt  2: 2pt  3: Arun
+  double ransac_threshold_bearing = 1e-4; // 2D-2D 的 1-cos 阈值
+  double ransac_threshold_3d = 0.03;      // 3D-3D 的米制阈值
+  int ransac_max_iterations = 2000;
+  double ransac_probability = 0.99;
+  bool refine = true;                     // 用内点做一次非线性精修
+  std::string csv_path;                   // 逐帧 RPE 输出
+  int max_frames = 0;                     // 0 = 不限制
+};
 
-// ---- 以下是我们补充的超参数 -------------------------------------------------
-// 2D-2D 的 RANSAC 阈值用的是 OpenGV 的 "1 - cos(alpha)" 度量（见
-// CentralRelativePoseSacProblem::getSelectedDistancesToModel），不是像素。
-// 1 - cos(alpha) ~ alpha^2 / 2，所以 1e-4 大约对应 0.8 度的重投影偏差。
-DEFINE_double(ransac_threshold_bearing, 1e-4,
-              "RANSAC inlier threshold for 2D-2D, in units of 1-cos(angle).");
-// 3D-3D 的阈值是米制的三维距离（PointCloudSacProblem 直接用欧氏距离）。
-DEFINE_double(ransac_threshold_3d, 0.03,
-              "RANSAC inlier threshold for 3D-3D, in meters.");
-DEFINE_int32(ransac_max_iterations, 2000, "RANSAC maximum number of iterations.");
-DEFINE_double(ransac_probability, 0.99, "RANSAC desired success probability.");
-DEFINE_bool(refine, true,
-            "Refine the RANSAC model on its inliers (OpenGV optimizeModelCoefficients).");
-DEFINE_string(csv_path, "", "If non-empty, append per-frame RPE statistics to this CSV file.");
-DEFINE_int32(max_frames, 0, "Stop after this many frames (0 = run until the bag ends).");
+static Options g_opt;
 
 using namespace std;
 namespace enc = sensor_msgs::image_encodings;
@@ -162,7 +154,7 @@ double rotationErrorDegrees(const Eigen::Matrix3d& R_gt, const Eigen::Matrix3d& 
  */
 template <typename RansacT>
 void refineRansacModel(RansacT& ransac, size_t min_inliers) {
-  if (!FLAGS_refine) return;
+  if (!g_opt.refine) return;
   if (ransac.inliers_.size() < min_inliers) return;
   opengv::transformation_t refined;
   ransac.sac_model_->optimizeModelCoefficients(
@@ -260,7 +252,7 @@ void updatePoseEstimate(geometry_msgs::Pose const& prev_pose, geometry_msgs::Pos
  * @param      translation       estimated translation between current frame and previous frame
  */
 void scaleTranslation(geometry_msgs::Point& translation, geometry_msgs::PoseStamped const& prev_pose, geometry_msgs::PoseStamped const& curr_pose) {
-  if (!FLAGS_scale_translation) return;
+  if (!g_opt.scale_translation) return;
   tf::Transform prev, curr;
   tf::poseMsgToTF(prev_pose.pose, prev);
   tf::poseMsgToTF(curr_pose.pose, curr);
@@ -315,7 +307,7 @@ void evaluateRPE(const tf::Transform& gt_t_prev_frame,
   // 2) 平移误差。2D-2D（5/8/2 点）只能恢复到尺度，估计出来的平移模长恒为 1，
   //    因此按讲义要求把真值平移也归一化，比较的是"方向"而不是"长度"。
   //    3D-3D（Arun）没有尺度歧义，直接用原始平移比较。
-  if (FLAGS_pose_estimator < 3) {
+  if (g_opt.pose_estimator < 3) {
     if (t_gt.norm() > 1e-12) t_gt.normalize();
     if (t_est.norm() > 1e-12) t_est.normalize();
   }
@@ -467,7 +459,7 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
   geometry_msgs::Pose relative_pose_estimate = pose_estimation.pose;
   g_num_inliers = -1;
 
-  switch(FLAGS_pose_estimator) {
+  switch(g_opt.pose_estimator) {
   case 0: {
     // *********************************************************************************
     // ******************************** 5-point Method *********************************
@@ -476,7 +468,7 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
     // First, ensure we have the minimal number of correspondences to compute the relative pose.
     static constexpr size_t min_nr_of_correspondences = 5;
     if (adapter_mono.getNumberCorrespondences() >= min_nr_of_correspondences) {
-      if (!FLAGS_use_ransac) {
+      if (!g_opt.use_ransac) {
         // Without RANSAC [OPTIONAL]
         // Consider using the "extractPose" function provided to obtain inliers, rotation, and translation
 
@@ -508,9 +500,9 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
 
         opengv::sac::Ransac<RansacProblem> ransac;
         ransac.sac_model_ = std::make_shared<RansacProblem>(adapter_mono, RansacProblem::NISTER);
-        ransac.threshold_ = FLAGS_ransac_threshold_bearing;
-        ransac.max_iterations_ = FLAGS_ransac_max_iterations;
-        ransac.probability_ = FLAGS_ransac_probability;
+        ransac.threshold_ = g_opt.ransac_threshold_bearing;
+        ransac.max_iterations_ = g_opt.ransac_max_iterations;
+        ransac.probability_ = g_opt.ransac_probability;
 
         if (ransac.computeModel() && ransac.inliers_.size() >= min_nr_of_correspondences) {
           refineRansacModel(ransac, min_nr_of_correspondences);
@@ -538,7 +530,7 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
     static constexpr size_t min_nr_of_correspondences = 8;
 
     if (adapter_mono.getNumberCorrespondences() >= min_nr_of_correspondences) {
-      if (!FLAGS_use_ransac) {
+      if (!g_opt.use_ransac) {
         // Without RANSAC [OPTIONAL]
         // Consider using the "extractPose" function provided to obtain inliers, rotation, and translation
         // Consider using "cv2Pose(Rmat, tmat)" to recover the rotation Rmat and translation tmat
@@ -570,9 +562,9 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
         // （Longuet-Higgins 的 8 点法，最小样本 8 个点）。
         opengv::sac::Ransac<RansacProblem> ransac;
         ransac.sac_model_ = std::make_shared<RansacProblem>(adapter_mono, RansacProblem::EIGHTPT);
-        ransac.threshold_ = FLAGS_ransac_threshold_bearing;
-        ransac.max_iterations_ = FLAGS_ransac_max_iterations;
-        ransac.probability_ = FLAGS_ransac_probability;
+        ransac.threshold_ = g_opt.ransac_threshold_bearing;
+        ransac.max_iterations_ = g_opt.ransac_max_iterations;
+        ransac.probability_ = g_opt.ransac_probability;
 
         if (ransac.computeModel() && ransac.inliers_.size() >= min_nr_of_correspondences) {
           refineRansacModel(ransac, min_nr_of_correspondences);
@@ -607,7 +599,7 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
       adapter_mono.setR12(rotation);
 
       // We only estimate the translation part
-      if (!FLAGS_use_ransac) {
+      if (!g_opt.use_ransac) {
         // Without RANSAC (OPTIONAL)
         // ***************************** begin solution *****************************
 
@@ -630,9 +622,9 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
         // 因此 RANSAC 只对平移做采样与投票。
         opengv::sac::Ransac<RansacProblemGivenRot> ransac;
         ransac.sac_model_ = std::make_shared<RansacProblemGivenRot>(adapter_mono);
-        ransac.threshold_ = FLAGS_ransac_threshold_bearing;
-        ransac.max_iterations_ = FLAGS_ransac_max_iterations;
-        ransac.probability_ = FLAGS_ransac_probability;
+        ransac.threshold_ = g_opt.ransac_threshold_bearing;
+        ransac.max_iterations_ = g_opt.ransac_max_iterations;
+        ransac.probability_ = g_opt.ransac_probability;
 
         if (ransac.computeModel() && ransac.inliers_.size() >= min_nr_of_correspondences) {
           refineRansacModel(ransac, min_nr_of_correspondences);
@@ -684,7 +676,7 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
 
     static constexpr int min_nr_of_correspondences = 3; 
     if (adapter_3d.getNumberCorrespondences() >= min_nr_of_correspondences) {
-      if (!FLAGS_use_ransac){
+      if (!g_opt.use_ransac){
         // Without RANSAC (Optional)
         // ***************************** begin solution *****************************
 
@@ -700,9 +692,9 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
         // 3D-3D 的 RANSAC 阈值是米制距离（PointCloudSacProblem 用 ||p1 - T p2||）。
         opengv::sac::Ransac<RansacProblem3D> ransac;
         ransac.sac_model_ = std::make_shared<RansacProblem3D>(adapter_3d);
-        ransac.threshold_ = FLAGS_ransac_threshold_3d;
-        ransac.max_iterations_ = FLAGS_ransac_max_iterations;
-        ransac.probability_ = FLAGS_ransac_probability;
+        ransac.threshold_ = g_opt.ransac_threshold_3d;
+        ransac.max_iterations_ = g_opt.ransac_max_iterations;
+        ransac.probability_ = g_opt.ransac_probability;
 
         if (ransac.computeModel() && ransac.inliers_.size() >= min_nr_of_correspondences) {
           refineRansacModel(ransac, min_nr_of_correspondences);
@@ -725,7 +717,7 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
   }
 
   // scale the relative pose estimate (for 5-pt, 2-pt and 8-pt, the translation is up to scale)
-  if (FLAGS_pose_estimator < 3) {
+  if (g_opt.pose_estimator < 3) {
     scaleTranslation(relative_pose_estimate.position, prev_pose_, curr_pose_);
   }
 
@@ -746,8 +738,8 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
   // 把逐帧误差写进 CSV，供离线画图（Python 侧只负责画，不重算算法）
   if (g_csv.is_open()) {
     g_csv << g_frame_id << ","
-          << FLAGS_pose_estimator << ","
-          << FLAGS_use_ransac << ","
+          << g_opt.pose_estimator << ","
+          << g_opt.use_ransac << ","
           << N << ","
           << g_num_inliers << ","
           << std::fixed << std::setprecision(6)
@@ -771,8 +763,8 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
   prev_pose_ = curr_pose_;
 
   ++g_frame_id;
-  if (FLAGS_max_frames > 0 && g_frame_id >= FLAGS_max_frames) {
-    ROS_INFO("Reached --max_frames=%d, shutting down.", FLAGS_max_frames);
+  if (g_opt.max_frames > 0 && g_frame_id >= g_opt.max_frames) {
+    ROS_INFO("Reached --max_frames=%d, shutting down.", g_opt.max_frames);
     if (g_csv.is_open()) g_csv.close();
     ros::shutdown();
   }
@@ -784,7 +776,6 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
  */
 int main(int argc, char** argv) {
   google::InitGoogleLogging(argv[0]);
-  google::ParseCommandLineFlags(&argc, &argv, true);
   google::InstallFailureSignalHandler();
 
   ros::init(argc, argv, "keypoint_trackers");
@@ -822,8 +813,18 @@ int main(int argc, char** argv) {
   local_nh.param("depth_scale", g_depth_scale, g_depth_scale);
   local_nh.param("min_depth", g_min_depth, g_min_depth);
   local_nh.param("max_depth", g_max_depth, g_max_depth);
-  std::string csv_path;
-  local_nh.param("csv_path", csv_path, std::string(""));
+  local_nh.param("use_ransac", g_opt.use_ransac, g_opt.use_ransac);
+  local_nh.param("scale_translation", g_opt.scale_translation, g_opt.scale_translation);
+  local_nh.param("pose_estimator", g_opt.pose_estimator, g_opt.pose_estimator);
+  local_nh.param("ransac_threshold_bearing", g_opt.ransac_threshold_bearing,
+                 g_opt.ransac_threshold_bearing);
+  local_nh.param("ransac_threshold_3d", g_opt.ransac_threshold_3d, g_opt.ransac_threshold_3d);
+  local_nh.param("ransac_max_iterations", g_opt.ransac_max_iterations,
+                 g_opt.ransac_max_iterations);
+  local_nh.param("ransac_probability", g_opt.ransac_probability, g_opt.ransac_probability);
+  local_nh.param("refine", g_opt.refine, g_opt.refine);
+  local_nh.param("max_frames", g_opt.max_frames, g_opt.max_frames);
+  local_nh.param("csv_path", g_opt.csv_path, std::string(""));
 
   // Constant extrinsics of the camera wrt the body, T_{camera}^{body}
   T_camera_body = cv::Mat::zeros(cv::Size(4,4),CV_64F);
@@ -840,7 +841,7 @@ int main(int argc, char** argv) {
   tf::poseMsgToTF(pose_camera_body, transform_camera_body);
 
   // 打开 CSV（只在第一次调用时写表头）
-  std::string const csv_file = FLAGS_csv_path.empty() ? csv_path : FLAGS_csv_path;
+  std::string const csv_file = g_opt.csv_path;
   if (!csv_file.empty()) {
     g_csv.open(csv_file, std::ios::out | std::ios::trunc);
     if (g_csv.is_open()) {
@@ -858,9 +859,11 @@ int main(int argc, char** argv) {
   auto pose_sub = local_nh.subscribe("/ground_truth_pose", 10, poseCallbackTesse);
 
   // Subscribe to rgb and depth images.
-  image_transport::ImageTransport it(local_nh);
-  image_transport::SubscriberFilter sf_rgb(it, "/rgb_images_topic", 1);
-  image_transport::SubscriberFilter sf_depth(it, "/depth_images_topic", 1);
+  // 用 message_filters 的裸 Subscriber，不经过 image_transport：
+  // image_transport 是系统包，会把 /usr/lib/.../libopencv_*.so.3.2 拖进进程，
+  // 与课程依赖里自编的 OpenCV 3.4（带 nonfree）在同一进程内混链。
+  message_filters::Subscriber<sensor_msgs::Image> sf_rgb(local_nh, "/rgb_images_topic", 1);
+  message_filters::Subscriber<sensor_msgs::Image> sf_depth(local_nh, "/depth_images_topic", 1);
 
   typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::Image> MySyncPolicy;
   message_filters::Synchronizer<MySyncPolicy> sync(MySyncPolicy(10), sf_rgb, sf_depth);

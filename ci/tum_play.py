@@ -1,4 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+#
+# ROS melodic 的 rospy / cv_bridge 只有 python2.7 的绑定，所以这个脚本必须
+# 写成 py2/py3 双兼容，并显式声明 utf-8 编码（否则 py2 读到中文注释直接报
+# SyntaxError: Non-ASCII character）。业务逻辑本身两边都成立。
 """
 把 TUM RGB-D 序列"当成 office.bag"喂给 lab_6 节点。
 

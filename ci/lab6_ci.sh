@@ -190,7 +190,7 @@ s_apt() {
     libeigen3-dev libtbb-dev libgtk2.0-dev \
     libjpeg-dev libpng-dev libtiff-dev \
     libavcodec-dev libavformat-dev libswscale-dev libv4l-dev \
-    ros-melodic-cv-bridge ros-melodic-image-transport ros-melodic-rosbag \
+    ros-melodic-cv-bridge ros-melodic-message-filters ros-melodic-image-transport ros-melodic-rosbag \
     ros-melodic-tf ros-melodic-tf-conversions ros-melodic-nav-msgs \
     xvfb x11-utils imagemagick ffmpeg 2>&1 | tail -20
 
@@ -438,10 +438,12 @@ s_build_main() {
     echo "- ROS: $(. /opt/ros/melodic/setup.bash && echo "$ROS_DISTRO")"
     echo "- gcc: $(gcc -dumpversion)"
     echo "- cmake: $(cmake --version | head -1)"
-    echo "- OpenCV: $(grep -h 'define CV_VERSION ' \
-      "$WS_DEPS/install/include/opencv2/core/version.hpp" \
-      /usr/local/include/opencv2/core/version.hpp \
-      /usr/include/opencv*/opencv2/core/version.hpp 2>/dev/null | head -1)"
+    # version.hpp 里 CV_VERSION 是宏拼接，grep 出来是宏定义本身。
+    # 直接抽 MAJOR/MINOR/REVISION 三个数字拼成 x.y.z。
+    cv_hdr="$WS_DEPS/install/include/opencv2/core/version.hpp"
+    cv_ver=$(awk '/#define +CV_VERSION_(MAJOR|MINOR|REVISION) +[0-9]+/{printf "%s.", $3}' \
+             "$cv_hdr" 2>/dev/null | sed 's/\.$//')
+    echo "- OpenCV: ${cv_ver:-unknown} (ws_deps，带 nonfree)"
     echo
     echo "## opengv 状态"
     [ "$rc_opengv" -eq 0 ] && echo "- opengv: 编译成功" || echo "- opengv: 编译失败 (rc=$rc_opengv)"
@@ -517,14 +519,17 @@ s_run() {
   # shellcheck disable=SC1090
   source "$WS_MAIN/devel/setup.bash"
 
+  # 参数走 ROS 私有参数（_name:=value），不再用 gflags：
+  # melodic 下 gflags 的全局 std::string 与 roscpp 的 std::string 跨库传递会踩堆。
   rosrun lab_6 pose_estimation \
       __name:=lab_6 \
-      --pose_estimator="$est" \
-      --use_ransac=true \
-      --scale_translation=1 \
-      --csv_path="$csv" \
-      --ransac_threshold_bearing=1e-4 \
-      --ransac_threshold_3d=0.03 \
+      _pose_estimator:="$est" \
+      _use_ransac:=true \
+      _scale_translation:=true \
+      _csv_path:="$csv" \
+      _ransac_threshold_bearing:=1e-4 \
+      _ransac_threshold_3d:=0.03 \
+      _ransac_max_iterations:=2000 \
       /ground_truth_pose:=/tesse/odom \
       /rgb_images_topic:=/tesse/left_cam/rgb/image_raw \
       /depth_images_topic:=/tesse/depth_cam/mono/image_raw \
