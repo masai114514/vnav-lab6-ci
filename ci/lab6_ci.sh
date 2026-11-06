@@ -619,13 +619,13 @@ set_camera_params() {
 }
 
 s_run() {
-  local est="$1" rate="${2:-8}"
+  local est="$1" rate="${2:-8}" refine="${3:-true}" tag="${4:-}"
   need_bin "$WS_MAIN/devel/lib/lab_6/pose_estimation" || return 1
   start_master || return 1
   set_camera_params
 
-  local csv="$OUT/rpe_${est}.csv"
-  local log="$OUT/run_${est}.log"
+  local csv="$OUT/rpe_${est}${tag}.csv"
+  local log="$OUT/run_${est}${tag}.log"
   : > "$log"
   # 正式跑不存 PNG：798 帧 × 2 张会让每一步多花几十秒，而且产物不看这些图
   rosparam set /lab_6/output_dir ""
@@ -639,6 +639,7 @@ s_run() {
       _pose_estimator:="$est" \
       _use_ransac:=true \
       _scale_translation:=true \
+      _refine:="$refine" \
       _csv_path:="$csv" \
       _ransac_threshold_bearing:=1e-4 \
       _ransac_threshold_3d:=0.03 \
@@ -661,7 +662,7 @@ s_run() {
   else
     play_lim=$(awk -v n="$nframes" -v r="$rate" 'BEGIN{printf "%d", n/r*1.6+180}')
   fi
-  say "估计器 $est：$nframes 帧 @ ${rate}，播放上限 ${play_lim}s"
+  say "估计器 $est（refine=$refine）：$nframes 帧 @ ${rate}，播放上限 ${play_lim}s"
 
   local py
   py="$(command -v python || command -v python3)"
@@ -706,6 +707,19 @@ s_run_8pt()  { s_run 1 lockstep; }
 s_run_2pt()  { s_run 2 lockstep; }
 s_run_arun() { s_run 3 lockstep; }
 
+# ---------------------------------------------------------------------------
+# 对照组：关掉 RANSAC 之后的非线性精化（_refine:=false）
+#
+# 起因：CI 的 2 点法**旋转取自真值**，误差本该是机器精度，实测却是 0.415°。
+# 查 OpenGV 源码发现 TranslationOnlySacProblem::optimizeModelCoefficients 调用的是
+# relative_pose::optimize_nonlinear(_adapter, inliers)——它优化**完整的 6 自由度**，
+# 会把适配器里给定的 R12 一起改掉。5 点法走同一个函数，所以在 10.7 mm 的短基线上，
+# 精化很可能把 RANSAC 的好解拉坏了。
+# 这两组就是用来定性的：若 2 点法的旋转误差回到 ~1e-6，说明 R 确实被动过。
+# ---------------------------------------------------------------------------
+s_run_5pt_raw() { s_run 0 lockstep false _norefine; }
+s_run_2pt_raw() { s_run 2 lockstep false _norefine; }
+
 # =============================================================================
 # S7 汇总
 # =============================================================================
@@ -742,6 +756,8 @@ main() {
   stage run_8pt    s_run_8pt
   stage run_2pt    s_run_2pt
   stage run_arun   s_run_arun
+  stage run_5pt_raw s_run_5pt_raw
+  stage run_2pt_raw s_run_2pt_raw
   stage summary    s_summary
 
   hr

@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <memory>
 #include <cmath>
+#include <algorithm>
 #include <string>
 
 #include <glog/logging.h>
@@ -126,6 +127,7 @@ int g_num_inliers = -1;         // 本帧 RANSAC 内点数（-1 表示该方法�
 double g_rot_err_deg = 0.0;     // 旋转误差（度），便于对照讲义里 "1 度" 的口径
 double g_rot_err_chordal = 0.0; // 旋转误差的 chordal 距离 ||R_gt - R_est||_F
 double g_trans_err = 0.0;       // 平移误差（2D-2D 归一化后比较方向）
+double g_spread_deg = 0.0;      // 前端的等效半视场角（点集辐角中位数），H1 诊断用
 double g_depth_scale = 5000.0;  // 16 位深度图的量化系数（TUM: 5000 单位 = 1 米）
 double g_min_depth = 0.3;       // 三维点有效深度下限（米）
 double g_max_depth = 8.0;       // 三维点有效深度上限（米）
@@ -160,6 +162,27 @@ void refineRansacModel(RansacT& ransac, size_t min_inliers) {
   ransac.sac_model_->optimizeModelCoefficients(
       ransac.inliers_, ransac.model_coefficients_, refined);
   ransac.model_coefficients_ = refined;
+}
+
+
+/**
+ * @brief 点集的**等效半视场角**（度）：各轴承向量与光轴的夹角的中位数。
+ *
+ * 这是 H1 诊断用的量，不参与估计。短基线（~10 mm）下旋转主要由**远处点**的
+ * 方向差决定：若前端保留的点更集中在图像中心，这个角就小，同样的像素误差
+ * 对应的旋转不确定度更大。离线消融（feature_spread_ablation.py）显示
+ * 半视场角从 20.8° 压到 9.2° 时，5 点法旋转中位从 0.39° 涨到 1.08°。
+ */
+double bearingSpreadDegrees(const opengv::bearingVectors_t& bv) {
+  if (bv.empty()) return 0.0;
+  std::vector<double> ang;
+  ang.reserve(bv.size());
+  for (auto const& b : bv) {
+    double const rho = std::sqrt(b(0, 0) * b(0, 0) + b(1, 0) * b(1, 0));
+    ang.push_back(std::atan2(rho, b(2, 0)) * 180.0 / M_PI);
+  }
+  std::sort(ang.begin(), ang.end());
+  return ang[ang.size() / 2];
 }
 
 
@@ -458,6 +481,8 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
   // initialize a relative pose estimate, you will update relative_pose_estimate using the following algorithms
   geometry_msgs::Pose relative_pose_estimate = pose_estimation.pose;
   g_num_inliers = -1;
+  // H1 诊断：记录本帧前端的等效半视场角（只统计，不参与估计）
+  g_spread_deg = bearingSpreadDegrees(bearing_vector_1);
 
   switch(g_opt.pose_estimator) {
   case 0: {
@@ -750,7 +775,8 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
             << std::fixed << std::setprecision(6)
             << g_rot_err_deg << ","
             << g_rot_err_chordal << ","
-            << g_trans_err << "\n";
+            << g_trans_err << ","
+            << g_spread_deg << "\n";
       g_csv.flush();
     }
   }
@@ -857,7 +883,7 @@ int main(int argc, char** argv) {
     g_csv.open(csv_file, std::ios::out | std::ios::trunc);
     if (g_csv.is_open()) {
       g_csv << "frame,estimator,use_ransac,n_matches,n_inliers,"
-               "rot_err_deg,rot_err_chordal,trans_err\n";
+               "rot_err_deg,rot_err_chordal,trans_err,spread_deg\n";
       ROS_INFO("Logging RPE statistics to %s", csv_file.c_str());
     } else {
       ROS_WARN("Could not open CSV file %s for writing.", csv_file.c_str());
