@@ -725,28 +725,34 @@ void cameraCallback(const sensor_msgs::ImageConstPtr &rgb_msg, const sensor_msgs
   updatePoseEstimate(prev_pose_.pose, relative_pose_estimate, pose_estimation.pose);
 
   // Compute tf::Transform in order to do actual pose operations.
-  tf::Transform gt_t_prev_frame, gt_t_curr_frame;
-  tf::Transform est_t_prev_frame, est_t_curr_frame;
-  tf::poseMsgToTF(pose_estimation.pose, est_t_curr_frame);
-  tf::poseMsgToTF(curr_pose_.pose, gt_t_curr_frame);
-  tf::poseMsgToTF(prev_pose_.pose, est_t_prev_frame);
-  tf::poseMsgToTF(prev_pose_.pose, gt_t_prev_frame);
+  //
+  // 第 0 帧没有"上一帧"：prev_pose_ 还是初始值，真值相对平移是零向量，
+  // 归一化后按定义会得到 NaN（CI 里就是 0,0,1,1983,1943,0.000000,-nan,-nan）。
+  // 那不是误差，是"没有定义"，所以直接不记这一帧。
+  if (g_frame_id > 0) {
+    tf::Transform gt_t_prev_frame, gt_t_curr_frame;
+    tf::Transform est_t_prev_frame, est_t_curr_frame;
+    tf::poseMsgToTF(pose_estimation.pose, est_t_curr_frame);
+    tf::poseMsgToTF(curr_pose_.pose, gt_t_curr_frame);
+    tf::poseMsgToTF(prev_pose_.pose, est_t_prev_frame);
+    tf::poseMsgToTF(prev_pose_.pose, gt_t_prev_frame);
 
-  // Evaluate pose errors
-  evaluateRPE(gt_t_prev_frame, gt_t_curr_frame,est_t_prev_frame,est_t_curr_frame);
+    // Evaluate pose errors
+    evaluateRPE(gt_t_prev_frame, gt_t_curr_frame,est_t_prev_frame,est_t_curr_frame);
 
-  // 把逐帧误差写进 CSV，供离线画图（Python 侧只负责画，不重算算法）
-  if (g_csv.is_open()) {
-    g_csv << g_frame_id << ","
-          << g_opt.pose_estimator << ","
-          << g_opt.use_ransac << ","
-          << N << ","
-          << g_num_inliers << ","
-          << std::fixed << std::setprecision(6)
-          << g_rot_err_deg << ","
-          << g_rot_err_chordal << ","
-          << g_trans_err << "\n";
-    g_csv.flush();
+    // 把逐帧误差写进 CSV，供离线画图（Python 侧只负责画，不重算算法）
+    if (g_csv.is_open()) {
+      g_csv << g_frame_id << ","
+            << g_opt.pose_estimator << ","
+            << g_opt.use_ransac << ","
+            << N << ","
+            << g_num_inliers << ","
+            << std::fixed << std::setprecision(6)
+            << g_rot_err_deg << ","
+            << g_rot_err_chordal << ","
+            << g_trans_err << "\n";
+      g_csv.flush();
+    }
   }
 
   // (TODO) Now, publish your estimated pose here. Since your pose estimate is

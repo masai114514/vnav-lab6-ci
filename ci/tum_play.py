@@ -34,6 +34,7 @@ import rospy
 import cv_bridge
 from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PoseStamped
 
 
 # 与 pose_estimation.cpp 中的 T_camera_body 完全一致
@@ -114,6 +115,12 @@ def main():
                     help='等订阅者的最长秒数，超时直接退出（默认 45）')
     ap.add_argument('--max-seconds', type=float, default=0.0,
                     help='整段播放的硬上限；0 = 按 帧数/频率 自动估')
+    # 逐帧同步：发完一帧就等节点把 /camera_pose 发回来，再发下一帧。
+    # 不开的话节点会丢帧（订阅队列只有 1，SIFT 一帧 310 ms > 8 Hz 的 125 ms），
+    # 798 帧只算出 315 行，而且丢哪几帧取决于算法快慢，三份数据对不齐。
+    ap.add_argument('--lockstep', action='store_true', help='每帧等节点回应再继续')
+    ap.add_argument('--frame-timeout', type=float, default=5.0,
+                    help='lockstep 下单帧等回应的上限（秒）')
     args, _ = ap.parse_known_args(rospy.myargv()[1:])
 
     rospy.init_node('tum_play', anonymous=True)
@@ -121,6 +128,14 @@ def main():
     pub_rgb = rospy.Publisher('/tesse/left_cam/rgb/image_raw', Image, queue_size=2)
     pub_depth = rospy.Publisher('/tesse/depth_cam/mono/image_raw', Image, queue_size=2)
     pub_odom = rospy.Publisher('/tesse/odom', Odometry, queue_size=10)
+
+    # 只用于 lockstep 计数：节点每处理完一帧都会在 /camera_pose 上发一次
+    pose_count = [0]
+
+    def on_pose(_msg):
+        pose_count[0] += 1
+
+    rospy.Subscriber('/camera_pose', PoseStamped, on_pose, queue_size=10)
 
     rgb = read_index(os.path.join(args.data, 'rgb.txt'))
     depth = read_index(os.path.join(args.data, 'depth.txt'))
@@ -130,9 +145,13 @@ def main():
         pairs = pairs[:args.max_frames]
     if args.max_seconds <= 0:
         # 1.6 倍余量 + 120 s 启动余量：801 帧 @8 Hz ≈ 100 s → 上限约 280 s
-        args.max_seconds = len(pairs) / max(args.rate, 1e-3) * 1.6 + 120.0
-    rospy.loginfo('tum_play: %d frames from %s (上限 %.0f s)',
-                  len(pairs), args.data, args.max_seconds)
+        if args.lockstep:
+            # 逐帧同步时墙钟取决于节点处理速度（SIFT ≈ 0.32 s/帧）
+            args.max_seconds = len(pairs) * 0.8 + 120.0
+        else:
+            args.max_seconds = len(pairs) / max(args.rate, 1e-3) * 1.6 + 120.0
+    rospy.loginfo('tum_play: %d frames from %s (上限 %.0f s, lockstep=%s)',
+                  len(pairs), args.data, args.max_seconds, args.lockstep)
 
     rate = rospy.Rate(args.rate)
     # 等订阅者连上（有上限：节点崩了就没人订阅，不能死等）
@@ -145,6 +164,7 @@ def main():
         rate.sleep()
 
     t0 = time.time()
+    no_resp = 0
     for idx, (ts, rgb_rel, depth_rel) in enumerate(pairs):
         if rospy.is_shutdown():
             break
@@ -193,9 +213,21 @@ def main():
 
         if (idx + 1) % 100 == 0:
             rospy.loginfo('tum_play: %d/%d', idx + 1, len(pairs))
-        rate.sleep()
+        if args.lockstep:
+            # 等节点把这一帧的位姿发回来，确保它真的处理完了再喂下一帧
+            before = pose_count[0]
+            t_lim = time.time() + args.frame_timeout
+            while pose_count[0] == before and time.time() < t_lim \
+                    and not rospy.is_shutdown():
+                rospy.sleep(0.01)
+            if pose_count[0] == before:
+                no_resp += 1
+        else:
+            rate.sleep()
 
-    rospy.loginfo('tum_play: done, waiting for the node to flush ...')
+    rospy.loginfo('tum_play: done%s, waiting for the node to flush ...',
+                  '' if not args.lockstep else
+                  '（%d 帧无回应）' % no_resp)
     rospy.sleep(2.0)
     return 0
 

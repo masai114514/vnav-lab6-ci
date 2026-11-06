@@ -655,13 +655,25 @@ s_run() {
   # 完全分不出来，一个估计器白等 20 分钟。
   local nframes play_lim
   nframes=$(grep -vc '^#' "$DATA/rgb.txt" 2>/dev/null || echo 0)
-  play_lim=$(awk -v n="$nframes" -v r="$rate" 'BEGIN{printf "%d", n/r*1.6+180}')
-  say "估计器 $est：$nframes 帧 @ ${rate} Hz，播放上限 ${play_lim}s"
+  if [ "$rate" = "lockstep" ]; then
+    # 逐帧同步：墙钟 ≈ 帧数 × 单帧处理时间（SIFT 约 0.32 s），给 0.8 s/帧的余量
+    play_lim=$(awk -v n="$nframes" 'BEGIN{printf "%d", n*0.8+180}')
+  else
+    play_lim=$(awk -v n="$nframes" -v r="$rate" 'BEGIN{printf "%d", n/r*1.6+180}')
+  fi
+  say "估计器 $est：$nframes 帧 @ ${rate}，播放上限 ${play_lim}s"
 
   local py
   py="$(command -v python || command -v python3)"
-  "$py" "$ROOT/ci/tum_play.py" --data "$DATA" --rate "$rate" \
-      --max-seconds "$play_lim" >> "$log" 2>&1 &
+  if [ "$rate" = "lockstep" ]; then
+    # 逐帧同步：节点处理完一帧才发下一帧。否则订阅队列只有 1，
+    # SIFT 一帧 310 ms 追不上 8 Hz 的 125 ms，798 帧只出来 300 多行。
+    "$py" "$ROOT/ci/tum_play.py" --data "$DATA" --lockstep --frame-timeout 6 \
+        --max-seconds "$play_lim" >> "$log" 2>&1 &
+  else
+    "$py" "$ROOT/ci/tum_play.py" --data "$DATA" --rate "$rate" \
+        --max-seconds "$play_lim" >> "$log" 2>&1 &
+  fi
   local play_pid=$!
   wait_node "$play_pid" "$((play_lim + 120))" || true
 
@@ -677,20 +689,22 @@ s_run() {
 
   local rows=0
   [ -f "$csv" ] && rows=$(($(wc -l < "$csv") - 1))
-  echo "estimator=$est  csv rows=$rows"
+  echo "estimator=$est  csv rows=$rows / $nframes 帧"
   grep -E '^\[RPE\] frame' "$log" | tail -3 || true
-  if [ "$rows" -gt 50 ]; then
+  # 逐帧同步下应当接近满帧（允许前几帧尚未建立跟踪）
+  local need=$((nframes * 8 / 10))
+  if [ "$rows" -ge "$need" ]; then
     return 0
   fi
-  warn "估计器 $est 的 CSV 只有 $rows 行 —— 见 $log"
+  warn "估计器 $est 的 CSV 只有 $rows 行（期望 ≥ $need）—— 见 $log"
   tail -40 "$log" || true
   return 1
 }
 
-s_run_5pt()  { s_run 0 8; }
-s_run_8pt()  { s_run 1 8; }
-s_run_2pt()  { s_run 2 8; }
-s_run_arun() { s_run 3 8; }
+s_run_5pt()  { s_run 0 lockstep; }
+s_run_8pt()  { s_run 1 lockstep; }
+s_run_2pt()  { s_run 2 lockstep; }
+s_run_arun() { s_run 3 lockstep; }
 
 # =============================================================================
 # S7 汇总
