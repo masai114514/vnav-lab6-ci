@@ -63,14 +63,14 @@ bash fetch_artifacts.sh 42231340010     # 指定一次
 | 4 | `build_main` | 编 `lab_5` / `lab_6`（`catkin build`）→ `ws_main/devel` |
 | 5 | `data` | 下 TUM fr1_xyz（三次重试，每次 450 s 上限） |
 | 6 | `smoke` | 用 gdb 跑 5 帧，确认节点不崩；崩了抓符号化栈 |
-| 7–10 | `run_5pt` `run_8pt` `run_2pt` `run_arun` | 四个估计器各跑一遍（`--lockstep`，797 帧），写 `rpe_{0,1,2,3}.csv` |
+| 7–10 | `run_5pt` `run_8pt` `run_2pt` `run_arun` | 四个估计器各跑一遍（`--lockstep`，每个约 797 帧），写 `rpe_{0,1,2,3}.csv` |
 | 11–12 | `run_5pt_raw` `run_2pt_raw` | 对照组：`_refine:=false`，用来分离「非线性精化」的影响 |
 | 13 | `summary` | 汇总帧数 / 中位误差 / 编译证据 → `out/report.md` |
 
 ## 最后一次全绿
 
-**run `42231340010`**（13/13 PASS，31 分 11 秒）。报告里的 CI 数字全部来自这一趟：
-5pt 1.927° / 1.168、8pt 1.108° / 1.006、2pt 0.000° / 0.392、Arun 0.280° / 4.4 mm。
+**run `42231340010`**（13/13 PASS，31 分 11 秒）。报告 §5 里的 CI 数字全部来自这一趟，
+`lab6/ci_out/` 存着同一趟的 6 份 CSV 与 `report.md`。
 
 ## 九个踩回去过的坑（都在脚本/工作流里留了注释）
 
@@ -109,7 +109,7 @@ bash fetch_artifacts.sh 42231340010     # 指定一次
 
 | 场景 | 实测 | 说明 |
 |---|---|---|
-| 依赖缓存 + 数据集缓存都命中 | 15–31 min | 只跑 5 个估计器 × 797 帧，波动主要来自 runner 负载 |
+| 依赖缓存 + 数据集缓存都命中 | 15–31 min | 6 次运行（4 个估计器 + 2 个对照）各约 797 帧，波动主要来自 runner 负载 |
 | 缓存失效 | 40 min 起 | OpenCV 3.4.2 + contrib 从源码编，2 vCPU 约 20–25 min；数据集 2–4 min |
 
 缓存两项：`ws_deps/install`（OpenCV 的 install 空间）与 `data/rgbd_dataset_freiburg1_xyz`。
