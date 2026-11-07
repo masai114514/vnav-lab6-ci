@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# fetch_artifacts.sh —— 把某次 lab5-ci 运行的产物拉回本地
+# fetch_artifacts.sh —— 把某次 lab6-ci 运行的产物拉回本地
 #
 # 用法：
 #   bash fetch_artifacts.sh                 # 取最近一次已完成的运行
@@ -8,24 +8,26 @@
 #   bash fetch_artifacts.sh <run_id> <dest> # 指定落地目录
 #   DEST=... bash fetch_artifacts.sh
 #
-# 落地内容（默认 DEST=<lab5>/ci_runs/lab5_run<id>）：
-#   report.md            两张统计表 + 图清单 + 构建证据（可直接往团队报告里贴）
-#   fig/*.png            D4/D5 的 keypoints / matches / 内点外点图，D6/D7 的 LK 轨迹图，D8 光流图
-#   pair_*.log           每个描述子一次 two_frames_tracking 的完整 stdout（含统计 7 行）
-#   video_*.log          视频模式的累计统计
-#   stage_*.log          每个 stage 的日志（apt / build_deps / build_main / ...）
-#   build_evidence.txt   编译器版本、ldd 出来的 OpenCV 版本、可执行文件清单
+# 落地内容（默认 DEST=<lab6>/ci_out/lab6_run<id>）：
+#   rpe_0.csv            5 点法（Nistér）逐帧旋转/平移误差
+#   rpe_1.csv            8 点法
+#   rpe_2.csv            2 点法（translation-only）
+#   rpe_3.csv            Arun 3D-3D
+#   rpe_{0,2}_norefine.csv  对照组（_refine:=false），用于分离非线性精化的影响
+#   run_*.log            每个估计器的完整节点日志
+#   build_evidence.txt   编译器 / OpenCV / opengv / ldd 证据
+#   report.md            帧数 + 编译证据 + 各 stage 的 PASS/FAIL
 #
 # 顺带记一笔 run 元信息（run_meta.txt），便于事后对账「哪一趟是什么参数」。
 # =============================================================================
 set -euo pipefail
 
-REPO="${REPO:-masai114514/vnav-lab5-ci}"
-WORKFLOW="${WORKFLOW:-lab5-ci.yml}"
-ARTIFACT="${ARTIFACT:-lab5-results}"
+REPO="${REPO:-masai114514/vnav-lab6-ci}"
+WORKFLOW="${WORKFLOW:-lab6-ci.yml}"
+ARTIFACT="${ARTIFACT:-lab6-results}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LAB5="$(cd "$HERE/.." && pwd)"
+LAB6="$(cd "$HERE/.." && pwd)"
 
 RUN_ID="${1:-}"
 if [ -n "${2:-}" ]; then
@@ -34,9 +36,9 @@ elif [ -n "${DEST:-}" ]; then
   : # 用外部传入的
 elif [ -n "$RUN_ID" ]; then
   # 目录名带上 run_id 尾部，避免「同一天两个 run 互相覆盖」
-  DEST="$LAB5/ci_runs/lab5_run${RUN_ID}"
+  DEST="$LAB6/ci_out/lab6_run${RUN_ID}"
 else
-  DEST="$LAB5/ci_runs/lab5_r$(date +%m%d)"
+  DEST="$LAB6/ci_out/lab6_r$(date +%m%d)"
 fi
 
 say()  { printf '\033[1;36m[fetch]\033[0m %s\n' "$*"; }
@@ -117,23 +119,19 @@ ls -la "$DEST" | sed 's/^/    /'
 echo
 say "快速判读："
 if [ -f "$DEST/report.md" ]; then
-  sed -n '/^## 1\./,/^## 3\./p' "$DEST/report.md" | head -32 | sed 's/^/    /'
+  sed -n '/^## 各估计器的 CSV 行数/,/^## 编译证据/p' "$DEST/report.md" | head -12 | sed 's/^/    /'
 else
   warn "  没有 report.md"
 fi
-if [ -d "$DEST/fig" ]; then
-  echo "    图：$(ls "$DEST/fig" | wc -l | tr -d ' ') 张 → $DEST/fig/"
-  ls "$DEST/fig" | head -12 | sed 's/^/      /'
-else
-  warn "    没有 fig/"
-fi
-if grep -qi "patented\|nonfree" "$DEST"/pair_SURF.log 2>/dev/null; then
-  warn "  SURF 报了 nonfree 错误（看 pair_SURF.log）"
+n_csv=$(ls "$DEST"/rpe_*.csv 2>/dev/null | wc -l | tr -d ' ')
+say "    CSV：$n_csv 个（每个估计器一份；_norefine 是对照组）"
+if grep -qi "^\- FAIL: .\+" "$DEST/report.md" 2>/dev/null; then
+  warn "  有 stage 失败 —— 看 $DEST/report.md 的 'stage 结果' 段"
 fi
 
 echo
 say "下一步："
 echo "    # 在浏览器里看这次运行的全部日志"
 echo "    gh run view $RUN_ID --repo $REPO --log"
-echo "    # 看图（macOS / WSL 各一条）"
-echo "    open $DEST/fig 2>/dev/null || explorer.exe \$(wslpath -w $DEST/fig 2>/dev/null) 2>/dev/null || true"
+echo "    # 直接用 CSV 重画报告里的图 / 重算中位数"
+echo "    python3 $LAB6/offline/plot_rpe.py --csv $DEST/rpe_0.csv --out $DEST/fig"
