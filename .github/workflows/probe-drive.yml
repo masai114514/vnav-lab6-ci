@@ -1,0 +1,29 @@
+name: probe-drive
+
+# 临时探针：验证 GitHub Actions 的 runner（美国）能不能直接取到老师给的数据集链接。
+# 不需要的话随时删掉这个文件。
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe Google Drive dataset link
+        run: |
+          ID=1TohOnfjR_FKf_y9wYTEkmv-XCuFPFRPt
+          echo "== 1) drive.usercontent.google.com (confirm=t) =="
+          curl -sSL -o /tmp/f1 -r 0-1048575 \
+            -w "http=%{http_code} type=%{content_type} bytes=%{size_download}\n" \
+            --max-time 60 "https://drive.usercontent.google.com/download?id=$ID&export=download&confirm=t" \
+            || echo "curl rc=$?"
+          file /tmp/f1 || true
+          echo "--- first 32 bytes ---"
+          head -c 32 /tmp/f1 | xxd || true
+          echo "== 2) drive.google.com/uc =="
+          curl -sSL -o /tmp/f2 -r 0-1048575 \
+            -w "http=%{http_code} type=%{content_type} bytes=%{size_download}\n" \
+            --max-time 60 "https://drive.google.com/uc?export=download&id=$ID" \
+            || echo "curl rc=$?"
+          file /tmp/f2 || true
