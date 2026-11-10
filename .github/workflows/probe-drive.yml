@@ -1,6 +1,6 @@
 name: probe-drive
 
-# 临时探针：Drive 返回的 2040 字节 HTML 到底要什么（打印出来 + 试 uuid 流程）。
+# 临时探针：两个 Drive 链接各自是"配额超限"还是真能下。
 on:
   workflow_dispatch:
 
@@ -9,33 +9,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Decode the confirm page
+      - name: Probe both links
         run: |
           python3 - <<'PY'
           import urllib.request, re
-          ID = "1TohOnfjR_FKf_y9wYTEkmv-XCuFPFRPt"
-          BASE = "https://drive.usercontent.google.com/download?id=%s&export=download&confirm=t" % ID
 
-          def get(url, hdrs=None):
-              req = urllib.request.Request(url, headers=hdrs or {})
-              with urllib.request.urlopen(req, timeout=120) as r:
-                  return r.status, dict(r.headers), r.read()
-
-          st, hd, body = get(BASE)
-          print("=== 第一次响应 ===", st, hd.get("Content-Type"), len(body))
-          print(body.decode("utf-8", "replace")[:1200])
-          print("=== 找 uuid / confirm ===")
-          txt = body.decode("utf-8", "replace")
-          for pat in (r'name="uuid" value="([^"]*)"', r'value="([^"]*)"\s+name="uuid"', r'uuid=([0-9a-f-]{20,})'):
-              m = re.search(pat, txt)
-              print(pat, "->", m.group(1) if m else None)
-          print("=== 带 uuid 再试 1 MB Range ===")
-          m = re.search(r'name="uuid" value="([^"]*)"', txt) or re.search(r'uuid=([0-9a-f-]{20,})', txt)
-          if m:
-              u = "%s&uuid=%s" % (BASE, m.group(1))
+          def probe(name, fid):
+              url = "https://drive.usercontent.google.com/download?id=%s&export=download&confirm=t" % fid
+              req = urllib.request.Request(url, headers={"Range": "bytes=0-1048575"})
               try:
-                  st2, hd2, b2 = get(u, {"Range": "bytes=0-1048575"})
-                  print("status", st2, "type", hd2.get("Content-Type"), "len", len(b2), "head", b2[:8])
+                  with urllib.request.urlopen(req, timeout=120) as r:
+                      body = r.read()
+                      ct = r.headers.get("Content-Type")
+                      cr = r.headers.get("Content-Range")
+                      if ct and "html" in ct:
+                          t = body.decode("utf-8", "replace")
+                          title = re.search(r"<title>([^<]*)</title>", t)
+                          print("%-10s -> HTML: %s (%d bytes)" % (name, title.group(1) if title else "?", len(body)))
+                      else:
+                          print("%-10s -> OK  type=%s range=%s len=%d head=%s" % (name, ct, cr, len(body), body[:8]))
               except Exception as e:
-                  print("ERR", e)
+                  print("%-10s -> ERR %s" % (name, str(e)[:80]))
+
+          probe("2024新", "1TohOnfjR_FKf_y9wYTEkmv-XCuFPFRPt")   # 老师这次给的 vnav-lab6-office
+          probe("2023旧", "1S9pqqIx43_NcL9RBmbr5JfMS17QfkDkW")   # 2023 版 page 的 office.bag
           PY
