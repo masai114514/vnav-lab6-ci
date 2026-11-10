@@ -1,0 +1,145 @@
+name: office-smoke
+
+# =============================================================================
+# 官方 office.bag 冒烟：下载 → rosbags 转 ROS1 → melodic 容器里跑 240 帧
+#
+# 为什么单独一个 workflow 而不改 lab6-ci：
+#   lab6-ci 现在跑的是 TUM 那套（797 帧、13 个 stage），跑一次 30 分钟，是报告
+#   里已有数字的来源，先不动它。这个 workflow 只回答一个问题：
+#   「换成老师给的官方数据，我们的节点能不能跑通、数是否合理」。
+#
+# 三个已知的坑，都在下面处理了：
+#   1) 本机取不到 Google Drive（直连超时 / 代理 502），但 runner 能取 —— 已实测。
+#   2) 直接 curl 整包会拿到一个 2 KB 的 HTML（病毒扫描提示页），必须带 Range：
+#      `-r 0-` 返回 206 + 完整字节流。这是本 workflow 里唯一"反直觉"的地方。
+#   3) 包是 8.57 GB zip，解压出 20.4 GB 的 db3；runner 有 ~88 GB 空闲，够用，
+#      但解压完立刻删 zip、转完立刻删 db3，避免峰值叠加。
+#
+# 产物：artifact `office-smoke`（CSV + 两个日志），以及跑完之后决定要不要全量。
+# =============================================================================
+on:
+  workflow_dispatch:
+
+env:
+  ROS_IMAGE: ros:melodic-ros-base
+  DRIVE_ID: 1TohOnfjR_FKf_y9wYTEkmv-XCuFPFRPt
+  ZIP_BYTES: '8574812697'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: 下载官方数据 → 转 ROS1 → 跑 240 帧
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # OpenCV 3.4.2 + nonfree 编译要 20 多分钟，和 lab6-ci 共用同一个缓存
+      - name: 恢复 OpenCV 依赖缓存
+        id: deps-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ws_deps/install
+          key: deps-melodic-nonfree-v1-${{ hashFiles('bundle/dependencies/opencv3_catkin/CMakeLists.txt') }}
+          restore-keys: |
+            deps-melodic-nonfree-v1-
+
+      - name: 环境与磁盘
+        shell: bash
+        run: |
+          echo "deps 缓存 = ${{ steps.deps-cache.outputs.cache-hit }}"
+          echo "vCPU = $(nproc)  内存 = $(free -m | awk '/Mem:/{print $2}') MB"
+          df -h .
+
+      - name: 下载官方数据集（必须带 Range）
+        shell: bash
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          mkdir -p data
+          URL="https://drive.usercontent.google.com/download?id=$DRIVE_ID&export=download&confirm=t"
+          echo "带 Range 请求整包……"
+          curl -fL --retry 4 --retry-all-errors --retry-delay 3 \
+               -r 0- -o data/vnav-lab6-office.zip "$URL"
+          got=$(stat -c%s data/vnav-lab6-office.zip)
+          echo "下载字节 = $got （期望 $ZIP_BYTES）"
+          [ "$got" = "$ZIP_BYTES" ] || { echo "::error::大小不符，可能是 HTML 提示页"; exit 1; }
+          file data/vnav-lab6-office.zip
+          unzip -l data/vnav-lab6-office.zip | head
+
+      - name: 解压（20.4 GB db3）并删 zip
+        shell: bash
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          unzip -q -o data/vnav-lab6-office.zip -d data/
+          du -sh data/vnav-lab6-office/*
+          df -h .
+          rm -f data/vnav-lab6-office.zip
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 转 ROS1 bag（rosbags 0.11.9）
+        shell: bash
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet "rosbags==0.11.9"
+          python -c "import rosbags, sys; print('rosbags on', sys.version.split()[0])"
+          time rosbags-convert --src data/vnav-lab6-office --dst data/office_ros1.bag
+          ls -la data/office_ros1.bag
+          rm -rf data/vnav-lab6-office
+          df -h .
+
+      - name: 跑节点（melodic 容器，240 帧）
+        shell: bash
+        timeout-minutes: 60
+        run: |
+          set -o pipefail
+          mkdir -p out
+          set +e
+          docker run --rm --user root \
+            -v "$PWD":"$PWD" -w "$PWD" \
+            "$ROS_IMAGE" \
+            bash ci/office_run.sh data/office_ros1.bag 0 240 0.15 12
+          rc=$?
+          set -e
+          sudo chown -R "$(id -u):$(id -g)" out ws_main data 2>/dev/null || true
+          echo "office_run.sh 退出码 = $rc"
+          exit $rc
+
+      - name: 上传产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: office-smoke
+          path: |
+            out/*.csv
+            out/*.log
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: 摘要
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## 官方 office.bag 冒烟"
+            echo
+            echo "- 依赖缓存：\`${{ steps.deps-cache.outputs.cache-hit }}\`"
+            echo
+            if [ -f out/office_est0.csv ]; then
+              echo "### CSV 前 5 行"
+              echo '```'
+              head -5 out/office_est0.csv
+              echo '```'
+              echo "行数 = $(wc -l < out/office_est0.csv)"
+            else
+              echo "_没有 out/office_est0.csv_"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
