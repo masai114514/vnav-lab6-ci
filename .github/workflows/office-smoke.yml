@@ -54,19 +54,37 @@ jobs:
           echo "vCPU = $(nproc)  内存 = $(free -m | awk '/Mem:/{print $2}') MB"
           df -h .
 
-      - name: 下载官方数据集（必须带 Range）
+      - name: 下载官方数据集（分块 Range）
         shell: bash
-        timeout-minutes: 30
+        timeout-minutes: 40
         run: |
           set -euo pipefail
           mkdir -p data
           URL="https://drive.usercontent.google.com/download?id=$DRIVE_ID&export=download&confirm=t"
-          echo "带 Range 请求整包……"
-          curl -fL --retry 4 --retry-all-errors --retry-delay 3 \
-               -r 0- -o data/vnav-lab6-office.zip "$URL"
+          # 只有"有限区间"的 Range 才会拿到真字节：-r 0- 会被当成没写 Range，
+          # 返回 2040 字节的 HTML 病毒扫描提示页（第一次就是这么挂的）。
+          # 所以切成 512 MB 一块，逐块下载再拼起来。
+          TOTAL=$ZIP_BYTES
+          CHUNK=$((512*1024*1024))
+          off=0; i=0; exp_total=0
+          while [ "$off" -lt "$TOTAL" ]; do
+            end=$((off+CHUNK-1)); [ "$end" -ge "$TOTAL" ] && end=$((TOTAL-1))
+            part=$(printf 'data/part.%03d' "$i")
+            exp=$((end-off+1))
+            echo "块 $i: $off-$end（$exp 字节）"
+            curl -fL --retry 5 --retry-all-errors --retry-delay 3 --max-time 900 \
+                 -r "$off-$end" -o "$part" "$URL"
+            got=$(stat -c%s "$part")
+            [ "$got" = "$exp" ] || { echo "::error::块 $i 拿到 $got 字节，期望 $exp"; exit 1; }
+            exp_total=$((exp_total+got))
+            off=$((end+1)); i=$((i+1))
+          done
+          echo "共 $i 块，合计 $exp_total 字节"
+          cat data/part.* > data/vnav-lab6-office.zip
+          rm -f data/part.*
           got=$(stat -c%s data/vnav-lab6-office.zip)
-          echo "下载字节 = $got （期望 $ZIP_BYTES）"
-          [ "$got" = "$ZIP_BYTES" ] || { echo "::error::大小不符，可能是 HTML 提示页"; exit 1; }
+          echo "拼好后 = $got （期望 $TOTAL）"
+          [ "$got" = "$TOTAL" ] || { echo "::error::拼接后大小不符"; exit 1; }
           file data/vnav-lab6-office.zip
           unzip -l data/vnav-lab6-office.zip | head
 
