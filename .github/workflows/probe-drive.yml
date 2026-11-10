@@ -1,38 +1,41 @@
 name: probe-drive
 
-# 临时探针：测 Drive 的 Range 上限（多大区间会退化成 HTML 提示页）。
+# 临时探针：Drive 返回的 2040 字节 HTML 到底要什么（打印出来 + 试 uuid 流程）。
 on:
   workflow_dispatch:
 
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
-      - name: Probe range sizes
+      - name: Decode the confirm page
         run: |
           python3 - <<'PY'
-          import urllib.request, time
+          import urllib.request, re
           ID = "1TohOnfjR_FKf_y9wYTEkmv-XCuFPFRPt"
-          URL = "https://drive.usercontent.google.com/download?id=%s&export=download&confirm=t" % ID
+          BASE = "https://drive.usercontent.google.com/download?id=%s&export=download&confirm=t" % ID
 
-          def probe(a, b):
-              req = urllib.request.Request(URL, headers={"Range": "bytes=%d-%d" % (a, b)})
-              t0 = time.time()
+          def get(url, hdrs=None):
+              req = urllib.request.Request(url, headers=hdrs or {})
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  return r.status, dict(r.headers), r.read()
+
+          st, hd, body = get(BASE)
+          print("=== 第一次响应 ===", st, hd.get("Content-Type"), len(body))
+          print(body.decode("utf-8", "replace")[:1200])
+          print("=== 找 uuid / confirm ===")
+          txt = body.decode("utf-8", "replace")
+          for pat in (r'name="uuid" value="([^"]*)"', r'value="([^"]*)"\s+name="uuid"', r'uuid=([0-9a-f-]{20,})'):
+              m = re.search(pat, txt)
+              print(pat, "->", m.group(1) if m else None)
+          print("=== 带 uuid 再试 1 MB Range ===")
+          m = re.search(r'name="uuid" value="([^"]*)"', txt) or re.search(r'uuid=([0-9a-f-]{20,})', txt)
+          if m:
+              u = "%s&uuid=%s" % (BASE, m.group(1))
               try:
-                  with urllib.request.urlopen(req, timeout=300) as r:
-                      data = r.read()
-                      return r.status, r.headers.get("Content-Type"), len(data), round(time.time() - t0, 1)
+                  st2, hd2, b2 = get(u, {"Range": "bytes=0-1048575"})
+                  print("status", st2, "type", hd2.get("Content-Type"), "len", len(b2), "head", b2[:8])
               except Exception as e:
-                  return "ERR", str(e)[:60], 0, round(time.time() - t0, 1)
-
-          MB = 1024 * 1024
-          for mb in (1, 8, 32, 64, 128, 256):
-              a = 0
-              b = mb * MB - 1
-              print("offset=0  size=%-4d MB -> %s" % (mb, probe(a, b)))
-          print("--- 非零起点，1 MB ---")
-          for off_mb in (1024, 4096, 8192):
-              a = off_mb * MB
-              print("offset=%-5d MB size=1 MB -> %s" % (off_mb, probe(a, a + MB - 1)))
+                  print("ERR", e)
           PY
