@@ -1,6 +1,6 @@
 name: probe-drive
 
-# 临时探针：验证 GitHub Actions 的 runner 能不能取到老师给的数据集，并报告总大小。
+# 临时探针：不下载 8GB 整包，只用 HTTP Range 读 zip 的中央目录 + metadata.yaml。
 on:
   workflow_dispatch:
 
@@ -9,18 +9,52 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Probe Google Drive dataset link
+      - name: Inspect remote zip via range requests
         run: |
-          ID=1TohOnfjR_FKf_y9wYTEkmv-XCuFPFRPt
-          URL="https://drive.usercontent.google.com/download?id=$ID&export=download&confirm=t"
-          echo "== headers (range 0-0) =="
-          curl -sSL -D /tmp/h -o /dev/null -r 0-0 --max-time 60 "$URL" || echo "curl rc=$?"
-          grep -iE "^(HTTP/|content-range|content-length|content-type|content-disposition)" /tmp/h || true
-          echo "== 全长下载 =="
-          /usr/bin/time -f "耗时 %es" curl -sSL -o /tmp/ds.zip --max-time 900 "$URL" || echo "curl rc=$?"
-          ls -l /tmp/ds.zip
-          du -h /tmp/ds.zip
-          echo "== zip 结构 =="
-          unzip -l /tmp/ds.zip | head -20
-          echo "== 顶层目录 =="
-          unzip -l /tmp/ds.zip | awk 'NR>3 {print $4}' | grep -v '^$' | cut -d/ -f1 | sort -u | head
+          df -h / | tail -1
+          python3 - <<'PY'
+import struct, urllib.request, zlib
+ID="1TohOnfjR_FKf_y9wYTEkmv-XCuFPFRPt"; TOTAL=8574812697
+URL=f"https://drive.usercontent.google.com/download?id={ID}&export=download&confirm=t"
+def rng(a,b):
+    req=urllib.request.Request(URL, headers={"Range":f"bytes={a}-{b}"})
+    with urllib.request.urlopen(req, timeout=180) as r: return r.read()
+tail=rng(TOTAL-262144,TOTAL-1)
+i=tail.rfind(b'PK\x05\x06')
+n_total,cdsize,cdoff=struct.unpack('<HII', tail[i+10:i+20])
+if n_total==0xFFFF or cdsize==0xFFFFFFFF or cdoff==0xFFFFFFFF:
+    j=tail.rfind(b'PK\x06\x06')
+    _,z64,_a,_b,_c,_d,_e,n_total,cdsize,cdoff=struct.unpack('<IQHHIIQQQQ', tail[j:j+56])
+print(f"entries={n_total} cdsize={cdsize} cdoff={cdoff}")
+cd=rng(cdoff,cdoff+cdsize-1); o=0; ent=[]
+while o<len(cd) and cd[o:o+4]==b'PK\x01\x02':
+    (_,_,_,flags,method,_t,_d,crc,csize,usize,fnl,efl,fcl,_dn,_ia,_ea,off)=struct.unpack('<IHHHHHHIIIHHHHHII',cd[o:o+46])
+    name=cd[o+46:o+46+fnl].decode('utf-8','replace'); extra=cd[o+46+fnl:o+46+fnl+efl]
+    if csize==0xFFFFFFFF or usize==0xFFFFFFFF or off==0xFFFFFFFF:
+        e=0
+        while e<len(extra):
+            hid,hsz=struct.unpack('<HH',extra[e:e+4])
+            if hid==1:
+                body=extra[e+4:e+4+hsz]; k=0
+                if usize==0xFFFFFFFF: usize=struct.unpack('<Q',body[k:k+8])[0]; k+=8
+                if csize==0xFFFFFFFF: csize=struct.unpack('<Q',body[k:k+8])[0]; k+=8
+                if off==0xFFFFFFFF: off=struct.unpack('<Q',body[k:k+8])[0]; k+=8
+                break
+            e+=4+hsz
+    ent.append((name,usize,csize,method,off)); o+=46+fnl+efl+fcl
+print(f"parsed={len(ent)}")
+for n,u,c,m,off in ent[:40]: print(f"  {u/1e6:9.1f} MB  method={m}  {n}")
+big=[e for e in ent if not e[0].endswith('/')]
+print("max file:", max(big, key=lambda x:x[1])[0], f"{max(x[1] for x in big)/1e9:.2f} GB")
+tgt=[e for e in ent if e[0].endswith('metadata.yaml')]
+if tgt:
+    n,u,c,m,off=tgt[0]
+    b=rng(off,off+200)
+    fnl,efl=struct.unpack('<HH',b[26:30]); ds=off+30+fnl+efl
+    raw=rng(ds,ds+c-1)
+    txt=zlib.decompress(raw,-15) if m==8 else raw
+    print("==== metadata.yaml ====")
+    print(txt.decode('utf-8','replace')[:3000])
+else:
+    print("no metadata.yaml found; names:", [e[0] for e in ent][:20])
+PY
