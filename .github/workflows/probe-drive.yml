@@ -12,7 +12,7 @@ jobs:
       - name: Inspect remote zip via range requests
         run: |
           df -h / | tail -1
-          sed 's/^          //' > /tmp/p.py <<'PY'
+          python3 - <<'PY'
           import struct, urllib.request, zlib
           ID = "1TohOnfjR_FKf_y9wYTEkmv-XCuFPFRPt"
           TOTAL = 8574812697
@@ -77,5 +77,3 @@ jobs:
               for e in ent[:25]:
                   print("   ", e[0])
           PY
-          head -3 /tmp/p.py
-          python3 /tmp/p.py
