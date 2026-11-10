@@ -1,36 +1,41 @@
 name: probe-drive
 
-# 临时探针：两个 Drive 链接各自是"配额超限"还是真能下。
+# 临时探针：判断 Drive 的限流是"文件级"还是"单 IP 流量级"。
 on:
   workflow_dispatch:
 
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - name: Probe both links
+      - name: Probe quota pattern
         run: |
           python3 - <<'PY'
-          import urllib.request, re
+          import urllib.request, time
+          ID = "1TohOnfjR_FKf_y9wYTEkmv-XCuFPFRPt"
+          URL = "https://drive.usercontent.google.com/download?id=%s&export=download&confirm=t" % ID
+          MB = 1024 * 1024
+          TOTAL = 8574812697
 
-          def probe(name, fid):
-              url = "https://drive.usercontent.google.com/download?id=%s&export=download&confirm=t" % fid
-              req = urllib.request.Request(url, headers={"Range": "bytes=0-1048575"})
+          def probe(a, n_mb):
+              b = min(a + n_mb * MB - 1, TOTAL - 1)
+              exp = b - a + 1
+              req = urllib.request.Request(URL, headers={"Range": "bytes=%d-%d" % (a, b)})
+              t0 = time.time()
               try:
-                  with urllib.request.urlopen(req, timeout=120) as r:
-                      body = r.read()
-                      ct = r.headers.get("Content-Type")
-                      cr = r.headers.get("Content-Range")
-                      if ct and "html" in ct:
-                          t = body.decode("utf-8", "replace")
-                          title = re.search(r"<title>([^<]*)</title>", t)
-                          print("%-10s -> HTML: %s (%d bytes)" % (name, title.group(1) if title else "?", len(body)))
-                      else:
-                          print("%-10s -> OK  type=%s range=%s len=%d head=%s" % (name, ct, cr, len(body), body[:8]))
+                  with urllib.request.urlopen(req, timeout=180) as r:
+                      data = r.read()
+                      return "%s  %d/%d bytes  %.1fs" % (r.headers.get("Content-Type", "?")[:22], len(data), exp, time.time() - t0)
               except Exception as e:
-                  print("%-10s -> ERR %s" % (name, str(e)[:80]))
+                  return "ERR %s" % str(e)[:50]
 
-          probe("2024新", "1TohOnfjR_FKf_y9wYTEkmv-XCuFPFRPt")   # 老师这次给的 vnav-lab6-office
-          probe("2023旧", "1S9pqqIx43_NcL9RBmbr5JfMS17QfkDkW")   # 2023 版 page 的 office.bag
+          print("从大偏移处要 64MB（新 runner，新 IP）：")
+          for off_gb in (4, 6, 7):
+              a = off_gb * 1024 * MB
+              print("  offset=%d GB -> %s" % (off_gb, probe(a, 64)))
+          print("从 0 开始连续要 3 个 64MB（看单 IP 能连续拉多少）：")
+          for k in range(3):
+              a = k * 64 * MB
+              print("  第 %d 块 -> %s" % (k, probe(a, 64)))
           PY
