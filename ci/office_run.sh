@@ -69,22 +69,33 @@ if ! command -v catkin >/dev/null 2>&1; then
   ls -la /etc/apt/sources.list.d/ 2>/dev/null || echo "(空)"
 
   cp -n /etc/apt/sources.list /etc/apt/sources.list.orig 2>/dev/null || true
-  cat > /etc/apt/sources.list <<'EOF'
-deb http://old-releases.ubuntu.com/ubuntu/ bionic main restricted universe multiverse
-deb http://old-releases.ubuntu.com/ubuntu/ bionic-updates main restricted universe multiverse
-deb http://old-releases.ubuntu.com/ubuntu/ bionic-security main restricted universe multiverse
-EOF
-  echo "---- 重写后的 sources.list ----"
-  cat /etc/apt/sources.list
 
-  # ROS 仓库 key 2025-06-01 过期。镜像里连 curl 都没有（run 43045015681：
-  # "curl: command not found"），所以别指望在线拉 key —— 直接标 trusted=yes，
-  # 跳过签名验证。这是 CI 临时容器，可接受。
+  # ROS 仓库 key 2025-06-01 过期，镜像里连 curl 都没有（run 43045015681:
+  # "curl: command not found"），拿不到 key —— 直接 trusted=yes 跳过签名。
   rm -f /etc/apt/sources.list.d/ros1-latest.list /etc/apt/sources.list.d/ros-latest.list
   echo "deb [trusted=yes] http://packages.ros.org/ros/ubuntu ${codename} main" \
     > /etc/apt/sources.list.d/ros1-latest.list
 
-  apt-get update -qq --allow-insecure-repositories 2>&1 | tail -8 || warn "apt-get update 有问题（继续尝试装包）"
+  # ubuntu 源要试几个：old-releases.ubuntu.com 在 runner 里 **DNS 解析不了**
+  # （run 43045912512: "Could not resolve 'old-releases.ubuntu.com'"）。
+  # GitHub runner 在 Azure，azure.archive 通常同网段最快。
+  apt_ok=""
+  for host in azure.archive.ubuntu.com archive.ubuntu.com mirrors.aliyun.com; do
+    echo "---- 尝试源：$host ----"
+    cat > /etc/apt/sources.list <<EOF
+deb http://$host/ubuntu/ bionic main restricted universe multiverse
+deb http://$host/ubuntu/ bionic-updates main restricted universe multiverse
+deb http://$host/ubuntu/ bionic-security main restricted universe multiverse
+EOF
+    apt-get update -qq --allow-insecure-repositories > /tmp/aptupdate.log 2>&1 || true
+    if ! grep -q "Could not resolve\|Failed to fetch" /tmp/aptupdate.log; then
+      apt_ok="$host"; echo "源可用：$host"; break
+    fi
+    echo "  不可用："; grep -E "Could not resolve|Failed to fetch|404" /tmp/aptupdate.log | head -3
+  done
+  [ -n "$apt_ok" ] || warn "三个镜像源都不可用，继续（大概率装不上）"
+  echo "---- 最终 sources.list ----"
+  cat /etc/apt/sources.list
 
   apt-get install -y -qq --no-install-recommends --allow-unauthenticated \
     build-essential cmake git curl patch pkg-config \
