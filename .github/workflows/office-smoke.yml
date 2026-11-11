@@ -1,38 +1,55 @@
 name: office-smoke
 
 # =============================================================================
-# 官方 office.bag 冒烟：下载 → rosbags 转 ROS1 → melodic 容器里跑 240 帧
+# 官方 office 数据集冒烟：取数据 → melodic 容器里跑 240 帧
 #
-# 为什么单独一个 workflow 而不改 lab6-ci：
-#   lab6-ci 现在跑的是 TUM 那套（797 帧、13 个 stage），跑一次 30 分钟，是报告
-#   里已有数字的来源，先不动它。这个 workflow 只回答一个问题：
-#   「换成老师给的官方数据，我们的节点能不能跑通、数是否合理」。
+# 数据从哪来：
+#   官方链接（Google Drive，1TohOnfjR_FKf_y9wYTEkmv-XCuFPFRPt）在这个网络里取不到，
+#   且全班同时下载会触发 "Google Drive - Quota exceeded"（HTTP 200 + 2040 字节 HTML）。
+#   老师给的包最终通过 QQ 闪传拿到，md5 3c825b6376836bf0300ed0ad36777657 校验通过。
 #
-# 三个已知的坑，都在下面处理了：
-#   1) 本机取不到 Google Drive（直连超时 / 代理 502），但 runner 能取 —— 已实测。
-#   2) 直接 curl 整包会拿到一个 2 KB 的 HTML（病毒扫描提示页），必须带 Range：
-#      `-r 0-` 返回 206 + 完整字节流。这是本 workflow 里唯一"反直觉"的地方。
-#   3) 包是 8.57 GB zip，解压出 20.4 GB 的 db3；runner 有 ~88 GB 空闲，够用，
-#      但解压完立刻删 zip、转完立刻删 db3，避免峰值叠加。
+#   整包 8.57 GB，解压出 20.4 GB 的 db3，没必要整包搬进 CI。这里用的是
+#   release 资产 lab6-office-data/office15.bag：
+#     · 源包连续前 15 秒（timestamp 24000000000 → 38994999999 ns）
+#     · 已用 rosbags 0.11.9 转成 ROS1 bag，7685 条消息 / 277 帧图像
+#     · 只保留 /tesse/odom、两路图像、两个 camera_info、/tf、/clock
+#   裁剪脚本见 ci/trim_db3.py（sqlite 层搬运，不碰消息格式）。
 #
-# 产物：artifact `office-smoke`（CSV + 两个日志），以及跑完之后决定要不要全量。
+# 为什么不能在本地用 ROS1 类型反序列化原 db3：
+#   原包是 ROS2 录的，Header.stamp 是 builtin_interfaces/Time；用 ROS1_NOETIC
+#   typestore 解析会在 offset 12 报 "Invalid string length"。必须让 rosbags-convert
+#   用源端的 typestore 转换，所以裁剪放在 sqlite 层做。
+#
+# 参数为什么不用覆盖：
+#   bag 里 camera_info 实测 K = [415.6922, 0, 360; 0, 415.6922, 240]，
+#   图像 720x480（中心正好 360/240），无畸变，深度 32FC1（单位米）——
+#   与 pose_estimation.cpp 的默认值一致，也与 depthToMeters() 的 CV_32F 分支一致。
 # =============================================================================
 on:
   workflow_dispatch:
+    inputs:
+      max_frames:
+        description: '最多处理多少帧'
+        required: false
+        default: '240'
+      rate:
+        description: 'rosbag play 速率'
+        required: false
+        default: '0.2'
 
 env:
   ROS_IMAGE: ros:melodic-ros-base
-  DRIVE_ID: 1TohOnfjR_FKf_y9wYTEkmv-XCuFPFRPt
-  ZIP_BYTES: '8574812697'
+  BAG_URL: https://github.com/masai114514/vnav-lab6-ci/releases/download/lab6-office-data/office15.bag
+  BAG_BYTES: '673442535'
 
 permissions:
   contents: read
 
 jobs:
   smoke:
-    name: 下载官方数据 → 转 ROS1 → 跑 240 帧
+    name: 取数据 → 跑 240 帧
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@v4
@@ -54,78 +71,21 @@ jobs:
           echo "vCPU = $(nproc)  内存 = $(free -m | awk '/Mem:/{print $2}') MB"
           df -h .
 
-      - name: 下载官方数据集（分块 Range + 配额重试）
+      - name: 下载裁剪后的 bag（release 资产）
         shell: bash
-        timeout-minutes: 60
+        timeout-minutes: 20
         run: |
           set -euo pipefail
           mkdir -p data
-          URL="https://drive.usercontent.google.com/download?id=$DRIVE_ID&export=download&confirm=t"
-          # 两个坑：
-          #  (1) `-r 0-` 会被当成没写 Range，返回 2040 字节 HTML。必须给有限区间。
-          #  (2) 这个文件被全班同时下载，Drive 会间歇性返回 "Quota exceeded" 页面
-          #      （HTTP 200 + text/html + 2040 字节），过一会儿又恢复。所以每块
-          #      都要核对字节数，不对就等 30 秒重试，而不是直接失败。
-          TOTAL=$ZIP_BYTES
-          CHUNK=$((256*1024*1024))
-
-          fetch_chunk() {   # $1=起始 $2=结束 $3=输出文件
-            local off=$1 end=$2 out=$3 exp try got
-            exp=$(( end - off + 1 ))
-            for try in 1 2 3 4 5 6 7 8; do
-              curl -fsL --max-time 900 -r "$off-$end" -o "$out" "$URL" || true
-              got=$(stat -c%s "$out" 2>/dev/null || echo 0)
-              if [ "$got" = "$exp" ]; then return 0; fi
-              echo "    第 $try 次只拿到 $got/$exp 字节（多半是配额页），等 30 秒"
-              sleep 30
-            done
-            return 1
-          }
-
-          off=0; i=0
-          while [ "$off" -lt "$TOTAL" ]; do
-            end=$((off+CHUNK-1)); [ "$end" -ge "$TOTAL" ] && end=$((TOTAL-1))
-            part=$(printf 'data/part.%03d' "$i")
-            echo "块 $i: $off-$end"
-            fetch_chunk "$off" "$end" "$part" || { echo "::error::块 $i 连续 8 次失败"; exit 1; }
-            off=$((end+1)); i=$((i+1))
-          done
-          echo "共 $i 块"
-          cat data/part.* > data/vnav-lab6-office.zip
-          rm -f data/part.*
-          got=$(stat -c%s data/vnav-lab6-office.zip)
-          echo "拼好后 = $got （期望 $TOTAL）"
-          [ "$got" = "$TOTAL" ] || { echo "::error::拼接后大小不符"; exit 1; }
-          file data/vnav-lab6-office.zip
-          unzip -l data/vnav-lab6-office.zip | head
-
-      - name: 解压（20.4 GB db3）并删 zip
-        shell: bash
-        timeout-minutes: 30
-        run: |
-          set -euo pipefail
-          unzip -q -o data/vnav-lab6-office.zip -d data/
-          du -sh data/vnav-lab6-office/*
-          df -h .
-          rm -f data/vnav-lab6-office.zip
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: 转 ROS1 bag（rosbags 0.11.9）
-        shell: bash
-        timeout-minutes: 60
-        run: |
-          set -euo pipefail
-          python -m pip install --quiet "rosbags==0.11.9"
-          python -c "import rosbags, sys; print('rosbags on', sys.version.split()[0])"
-          time rosbags-convert --src data/vnav-lab6-office --dst data/office_ros1.bag
-          ls -la data/office_ros1.bag
-          rm -rf data/vnav-lab6-office
+          curl -fL --retry 4 --retry-all-errors --retry-delay 3 \
+               -o data/office15.bag "$BAG_URL"
+          got=$(stat -c%s data/office15.bag)
+          echo "下载 = $got 字节（期望 $BAG_BYTES）"
+          [ "$got" = "$BAG_BYTES" ] || { echo "::error::bag 大小不符"; exit 1; }
+          file data/office15.bag
           df -h .
 
-      - name: 跑节点（melodic 容器，240 帧）
+      - name: 跑节点（melodic 容器）
         shell: bash
         timeout-minutes: 60
         run: |
@@ -135,7 +95,7 @@ jobs:
           docker run --rm --user root \
             -v "$PWD":"$PWD" -w "$PWD" \
             "$ROS_IMAGE" \
-            bash ci/office_run.sh data/office_ros1.bag 0 240 0.15 12
+            bash ci/office_run.sh data/office15.bag 0 "${{ inputs.max_frames }}" "${{ inputs.rate }}" 15
           rc=$?
           set -e
           sudo chown -R "$(id -u):$(id -g)" out ws_main data 2>/dev/null || true
@@ -158,9 +118,10 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## 官方 office.bag 冒烟"
+            echo "## 官方 office 数据集冒烟"
             echo
             echo "- 依赖缓存：\`${{ steps.deps-cache.outputs.cache-hit }}\`"
+            echo "- 数据：release 资产 \`lab6-office-data/office15.bag\`（前 15 秒，277 帧）"
             echo
             if [ -f out/office_est0.csv ]; then
               echo "### CSV 前 5 行"
@@ -171,4 +132,9 @@ jobs:
             else
               echo "_没有 out/office_est0.csv_"
             fi
+            echo
+            echo "### 节点日志末尾"
+            echo '```'
+            tail -20 "out/office_node_est0.log" 2>/dev/null || echo "(无)"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
