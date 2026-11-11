@@ -56,26 +56,36 @@ if ! command -v catkin >/dev/null 2>&1; then
   codename="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-bionic}}")"
   echo "发行版代号 = $codename"
 
-  # bionic 的免费仓库 2023-05 之后搬到 old-releases 了。不切的话
-  # `apt-get update` 仍可能"成功"（ROS 源是好的），但 ubuntu 源 404，
-  # 于是 libeigen3-dev / python-catkin-tools 全部 "has no installation candidate"
-  # —— run 43042466692 就挂在这。所以这里无条件切，别指望 update 的退出码。
-  sed -i -e 's|http://archive.ubuntu.com|http://old-releases.ubuntu.com|g' \
-         -e 's|http://security.ubuntu.com|http://old-releases.ubuntu.com|g' \
-         -e 's|http://ports.ubuntu.com|http://old-releases.ubuntu.com|g' \
-         /etc/apt/sources.list
+  # bionic 的免费仓库 2023-05 之后搬到 old-releases 了。
+  #
+  # 之前两次尝试都失败（run 43042466692 / 43043532048）：
+  #   · 第一次只 sed 了 sources.list，但 update 退出码是 0（ROS 源是好的），
+  #     于是修复分支没进去，install 时 libeigen3-dev 等全部 "no installation candidate"；
+  #   · 第二次无条件 sed，仍然一样 —— 说明 sed 根本没改到东西。
+  # 所以这里不猜了：先打印原文件，再**直接重写**一份已知可用的 bionic 源。
+  echo "---- 原 /etc/apt/sources.list ----"
+  cat /etc/apt/sources.list 2>/dev/null || echo "(不存在)"
+  echo "---- /etc/apt/sources.list.d ----"
+  ls -la /etc/apt/sources.list.d/ 2>/dev/null || echo "(空)"
 
-  # ROS 仓库 key 2025-06-01 过期，update 失败就重装 key
-  if ! apt-get update -qq >/dev/null 2>&1; then
-    warn "apt-get update 失败 —— 重装 ROS key"
-    mkdir -p /usr/share/keyrings
-    curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
-      -o /usr/share/keyrings/ros-archive-keyring.gpg
-    rm -f /etc/apt/sources.list.d/ros1-latest.list /etc/apt/sources.list.d/ros-latest.list
-    echo "deb [signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros/ubuntu ${codename} main" \
-      > /etc/apt/sources.list.d/ros1-latest.list
-    apt-get update -qq
-  fi
+  cp -n /etc/apt/sources.list /etc/apt/sources.list.orig 2>/dev/null || true
+  cat > /etc/apt/sources.list <<'EOF'
+deb http://old-releases.ubuntu.com/ubuntu/ bionic main restricted universe multiverse
+deb http://old-releases.ubuntu.com/ubuntu/ bionic-updates main restricted universe multiverse
+deb http://old-releases.ubuntu.com/ubuntu/ bionic-security main restricted universe multiverse
+EOF
+  echo "---- 重写后的 sources.list ----"
+  cat /etc/apt/sources.list
+
+  # ROS 仓库 key 2025-06-01 过期，先修后 update
+  mkdir -p /usr/share/keyrings
+  curl -fsSL --retry 3 https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+    -o /usr/share/keyrings/ros-archive-keyring.gpg || warn "取 ROS key 失败"
+  rm -f /etc/apt/sources.list.d/ros1-latest.list /etc/apt/sources.list.d/ros-latest.list
+  echo "deb [signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros/ubuntu ${codename} main" \
+    > /etc/apt/sources.list.d/ros1-latest.list
+
+  apt-get update -qq 2>&1 | tail -10 || warn "apt-get update 有问题（继续尝试装包）"
 
   apt-get install -y -qq --no-install-recommends \
     build-essential cmake git curl patch pkg-config \
@@ -91,6 +101,9 @@ if ! command -v catkin >/dev/null 2>&1; then
 fi
 command -v catkin >/dev/null 2>&1 || { warn "catkin 仍不可用，中止（否则会假绿）"; exit 5; }
 echo "catkin = $(command -v catkin)  $(catkin --version 2>&1 | head -1)"
+# Eigen 缺了 opengv 一定编不过，早点报出来，别等到 8 分钟后的 cmake
+[ -d /usr/include/eigen3 ] || warn "没有 /usr/include/eigen3 —— opengv 会失败"
+for p in cmake g++ git; do command -v "$p" >/dev/null || warn "缺 $p"; done
 
 say "依赖工作区（应来自 Actions 缓存）"
 if [ ! -d "$WS_DEPS/install" ]; then
