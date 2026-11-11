@@ -54,6 +54,18 @@ say "安装编译依赖（apt）"
 if ! command -v catkin >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   codename="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-bionic}}")"
+  echo "发行版代号 = $codename"
+
+  # bionic 的免费仓库 2023-05 之后搬到 old-releases 了。不切的话
+  # `apt-get update` 仍可能"成功"（ROS 源是好的），但 ubuntu 源 404，
+  # 于是 libeigen3-dev / python-catkin-tools 全部 "has no installation candidate"
+  # —— run 43042466692 就挂在这。所以这里无条件切，别指望 update 的退出码。
+  sed -i -e 's|http://archive.ubuntu.com|http://old-releases.ubuntu.com|g' \
+         -e 's|http://security.ubuntu.com|http://old-releases.ubuntu.com|g' \
+         -e 's|http://ports.ubuntu.com|http://old-releases.ubuntu.com|g' \
+         /etc/apt/sources.list
+
+  # ROS 仓库 key 2025-06-01 过期，update 失败就重装 key
   if ! apt-get update -qq >/dev/null 2>&1; then
     warn "apt-get update 失败 —— 重装 ROS key"
     mkdir -p /usr/share/keyrings
@@ -62,14 +74,9 @@ if ! command -v catkin >/dev/null 2>&1; then
     rm -f /etc/apt/sources.list.d/ros1-latest.list /etc/apt/sources.list.d/ros-latest.list
     echo "deb [signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros/ubuntu ${codename} main" \
       > /etc/apt/sources.list.d/ros1-latest.list
-    apt-get update -qq || {
-      warn "仍失败 —— 切 old-releases"
-      sed -i -e 's|http://archive.ubuntu.com|http://old-releases.ubuntu.com|g' \
-             -e 's|http://security.ubuntu.com|http://old-releases.ubuntu.com|g' \
-             /etc/apt/sources.list
-      apt-get update -qq
-    }
+    apt-get update -qq
   fi
+
   apt-get install -y -qq --no-install-recommends \
     build-essential cmake git curl patch pkg-config \
     autoconf automake libtool m4 \
@@ -77,10 +84,10 @@ if ! command -v catkin >/dev/null 2>&1; then
     python-catkin-tools \
     libboost-python-dev libboost-system-dev libboost-thread-dev libboost-filesystem-dev \
     libeigen3-dev libtbb-dev libgtk2.0-dev \
-    libjpeg-dev libpng-dev libtiff-dev \
+    libjpeg-dev libpng-dev libtiff5-dev \
     libavcodec-dev libavformat-dev libswscale-dev libv4l-dev \
     ros-melodic-cv-bridge ros-melodic-message-filters ros-melodic-image-transport ros-melodic-rosbag \
-    ros-melodic-tf ros-melodic-tf-conversions ros-melodic-nav-msgs 2>&1 | tail -10
+    ros-melodic-tf ros-melodic-tf-conversions ros-melodic-nav-msgs 2>&1 | tail -15
 fi
 command -v catkin >/dev/null 2>&1 || { warn "catkin 仍不可用，中止（否则会假绿）"; exit 5; }
 echo "catkin = $(command -v catkin)  $(catkin --version 2>&1 | head -1)"
