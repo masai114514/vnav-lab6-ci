@@ -199,8 +199,10 @@ say "播放 ${DUR}s（rate=$RATE）"
 rosbag play -r "$RATE" -u "$DUR" "$BAG" > "$OUT/office_play.log" 2>&1 || warn "rosbag play 退出码 $?"
 if kill -0 "$NODE_PID" 2>/dev/null; then
   echo "节点仍在运行（播放结束时）"
+elif [ -f "$CSV" ] && [ "$(wc -l < "$CSV")" -gt 1 ]; then
+  echo "节点已正常退出（达到 max_frames），CSV 有 $(( $(wc -l < "$CSV") - 1 )) 行"
 else
-  warn "节点在播放过程中已退出 —— 多半是参数/环境问题，见节点日志"
+  warn "节点提前退出且 CSV 为空 —— 多半是参数/环境问题，见节点日志"
 fi
 
 say "等节点结束（最多 180s）"
