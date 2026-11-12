@@ -1,7 +1,9 @@
 name: office-smoke
 
 # =============================================================================
-# 官方 office 数据集冒烟：取数据 → melodic 容器里跑 240 帧
+# 官方 office 数据集：取数据 → melodic 容器里跑 240 帧 × 四个估计器
+# 四个 job 并行（matrix estimator: 0/1/2/3），各自下载 bag、各自编译；
+# artifact 名带估计器编号，避免四个 job 上传同名产物互相覆盖。
 #
 # 数据从哪来：
 #   官方链接（Google Drive，1TohOnfjR_FKf_y9wYTEkmv-XCuFPFRPt）在这个网络里取不到，
@@ -47,9 +49,13 @@ permissions:
 
 jobs:
   smoke:
-    name: 取数据 → 跑 240 帧
+    name: est${{ matrix.estimator }} → 跑 240 帧
     runs-on: ubuntu-22.04
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        estimator: [0, 1, 2, 3]
 
     steps:
       - uses: actions/checkout@v4
@@ -95,7 +101,7 @@ jobs:
           docker run --rm --user root \
             -v "$PWD":"$PWD" -w "$PWD" \
             "$ROS_IMAGE" \
-            bash ci/office_run.sh data/office15.bag 0 "${{ inputs.max_frames }}" "${{ inputs.rate }}" 15
+            bash ci/office_run.sh data/office15.bag "${{ matrix.estimator }}" "${{ inputs.max_frames }}" "${{ inputs.rate }}" 15
           rc=$?
           set -e
           sudo chown -R "$(id -u):$(id -g)" out ws_main data 2>/dev/null || true
@@ -106,7 +112,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: office-smoke
+          name: office-smoke-est${{ matrix.estimator }}
           path: |
             out/*.csv
             out/*.log
@@ -118,23 +124,25 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## 官方 office 数据集冒烟"
+            E=${{ matrix.estimator }}
+            echo "## 官方 office 数据集 · estimator $E"
             echo
             echo "- 依赖缓存：\`${{ steps.deps-cache.outputs.cache-hit }}\`"
             echo "- 数据：release 资产 \`lab6-office-data/office15.bag\`（前 15 秒，277 帧）"
             echo
-            if [ -f out/office_est0.csv ]; then
+            if [ -f "out/office_est${E}.csv" ]; then
               echo "### CSV 前 5 行"
               echo '```'
-              head -5 out/office_est0.csv
+              head -5 "out/office_est${E}.csv"
               echo '```'
-              echo "行数 = $(wc -l < out/office_est0.csv)"
+              lines=$(wc -l < "out/office_est${E}.csv")
+              echo "行数 = $lines"
             else
-              echo "_没有 out/office_est0.csv_"
+              echo "_没有 out/office_est${E}.csv_"
             fi
             echo
             echo "### 节点日志末尾"
             echo '```'
-            tail -20 "out/office_node_est0.log" 2>/dev/null || echo "(无)"
+            tail -20 "out/office_node_est${E}.log" 2>/dev/null || echo "(无)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
