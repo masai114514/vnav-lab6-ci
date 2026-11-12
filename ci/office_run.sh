@@ -182,6 +182,7 @@ BUFPRE=""
 command -v stdbuf >/dev/null 2>&1 && BUFPRE="stdbuf -oL -eL"
 $BUFPRE rosrun lab_6 pose_estimation \
   __name:=lab_6 \
+  _pose_estimator:="$EST" \
   _use_ransac:=true \
   _scale_translation:=true \
   _refine:=true \
@@ -193,6 +194,11 @@ $BUFPRE rosrun lab_6 pose_estimation \
   > "$OUT/office_node_est${EST}.log" 2>&1 &
 NODE_PID=$!
 sleep 10
+# 回读私有参数：曾经漏传 _pose_estimator，四个 matrix job 全部静默跑成 est=0
+# （CSV 第二列全 0 才发现）。这里早一点把参数打出来，避免再来一次 6 分钟白跑。
+GOT_EST=$(rosparam get /lab_6/pose_estimator 2>/dev/null || echo "?")
+echo "rosparam /lab_6/pose_estimator = $GOT_EST （期望 $EST）"
+[ "$GOT_EST" = "$EST" ] || warn "估计器参数没生效！节点会跑默认的 5 点法"
 kill -0 "$NODE_PID" 2>/dev/null || warn "节点已经退出（可能启动失败），继续取日志"
 
 say "播放 ${DUR}s（rate=$RATE）"
