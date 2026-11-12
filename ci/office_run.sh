@@ -164,9 +164,24 @@ RC_PID=$!
 sleep 8
 kill -0 "$RC_PID" 2>/dev/null || { warn "roscore 没起来"; tail -20 "$OUT/office_roscore.log"; exit 4; }
 
+say "bag 话题体检"
+rosbag info "$BAG" 2>&1 | head -45 || true
+
+# 必须关掉交互窗口：lab_5 的 FeatureTracker::showImage() 读
+# ~interactive（默认 true），容器里没有 X display，cv::namedWindow 会直接抛异常，
+# 节点在处理完第一帧后就 rc=1 退出。症状与 run 43046752988 完全一致：
+# CSV 只剩表头、日志里只有 Gtk-WARNING + 两张 sift_keypoints PNG。
+# 正式 lab6_ci.sh:617 也是这么绕开的。output_dir 置空避免每帧存 PNG。
+rosparam set /lab_6/interactive false
+rosparam set /lab_6/output_dir ""
+
 say "起节点 estimator=$EST max_frames=$NFRAMES csv=$CSV"
-rosrun lab_6 pose_estimation \
-  _pose_estimator:="$EST" \
+# stdbuf 让 std::cout（"Matched N keypoints"）行缓冲，否则节点被 kill 时
+# 缓冲区没 flush，日志里看不到处理进度。没有 stdbuf 就裸跑。
+BUFPRE=""
+command -v stdbuf >/dev/null 2>&1 && BUFPRE="stdbuf -oL -eL"
+$BUFPRE rosrun lab_6 pose_estimation \
+  __name:=lab_6 \
   _use_ransac:=true \
   _scale_translation:=true \
   _refine:=true \
@@ -182,6 +197,11 @@ kill -0 "$NODE_PID" 2>/dev/null || warn "节点已经退出（可能启动失败
 
 say "播放 ${DUR}s（rate=$RATE）"
 rosbag play -r "$RATE" -u "$DUR" "$BAG" > "$OUT/office_play.log" 2>&1 || warn "rosbag play 退出码 $?"
+if kill -0 "$NODE_PID" 2>/dev/null; then
+  echo "节点仍在运行（播放结束时）"
+else
+  warn "节点在播放过程中已退出 —— 多半是参数/环境问题，见节点日志"
+fi
 
 say "等节点结束（最多 180s）"
 for _ in $(seq 1 90); do
