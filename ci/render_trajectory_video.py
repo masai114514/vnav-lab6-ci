@@ -29,7 +29,27 @@ def load_rows(path):
         "gt_x", "gt_y", "gt_z", "gt_qx", "gt_qy", "gt_qz", "gt_qw",
         "est_x", "est_y", "est_z", "est_qx", "est_qy", "est_qz", "est_qw",
     ]
-    return {name: [float(row[name]) for row in rows] for name in columns}
+    data = {name: [] for name in columns}
+    dropped = 0
+    for row in rows:
+        try:
+            values = [float(row[name]) for name in columns]
+        except (KeyError, TypeError, ValueError):
+            dropped += 1
+            continue
+        # Pose estimators can occasionally publish an invalid pose for a
+        # degenerate frame.  Such a sample must not be passed to Matplotlib,
+        # whose axis limits reject NaN/Inf values.
+        if not all(math.isfinite(value) for value in values):
+            dropped += 1
+            continue
+        for name, value in zip(columns, values):
+            data[name].append(value)
+    if not data["gt_x"]:
+        raise RuntimeError("trajectory CSV has no finite pose rows: %s" % path)
+    if dropped:
+        print("TRAJECTORY_FILTERED_INVALID_ROWS", dropped)
+    return data
 
 
 def yaw(qx, qy, qz, qw):
