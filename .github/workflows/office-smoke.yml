@@ -108,6 +108,23 @@ jobs:
           echo "office_run.sh 退出码 = $rc"
           exit $rc
 
+      - name: 生成 B 分工轨迹视频（5pt / 8pt）
+        if: always() && (matrix.estimator == 0 || matrix.estimator == 1)
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=${{ matrix.estimator }}
+          test -s "out/office_trajectory_est${E}.csv"
+          python3 -c 'import matplotlib, imageio_ffmpeg' 2>/dev/null || \
+            python3 -m pip install --user matplotlib imageio-ffmpeg
+          if [ "$E" = "0" ]; then METHOD="Five-point"; else METHOD="Eight-point"; fi
+          python3 ci/render_trajectory_video.py \
+            "out/office_trajectory_est${E}.csv" \
+            "out/trajectory_est${E}.mp4" \
+            --method "$METHOD" --fps 20
+          test -s "out/trajectory_est${E}.mp4"
+          file "out/trajectory_est${E}.mp4"
+
       - name: 上传产物
         if: always()
         uses: actions/upload-artifact@v4
@@ -116,6 +133,7 @@ jobs:
           path: |
             out/*.csv
             out/*.log
+            out/*.mp4
           retention-days: 14
           if-no-files-found: warn
 

@@ -28,6 +28,7 @@ NFRAMES=${3:-240}
 RATE=${4:-0.15}
 DUR=${5:-12}
 CSV="$ROOT/out/office_est${EST}.csv"
+TRAJ="$ROOT/out/office_trajectory_est${EST}.csv"
 
 OUT="$ROOT/out"; mkdir -p "$OUT"
 WS_DEPS="$ROOT/ws_deps"
@@ -164,6 +165,13 @@ RC_PID=$!
 sleep 8
 kill -0 "$RC_PID" 2>/dev/null || { warn "roscore 没起来"; tail -20 "$OUT/office_roscore.log"; exit 4; }
 
+say "记录真值与估计位姿轨迹"
+python "$ROOT/ci/trajectory_recorder.py" "$TRAJ" \
+  > "$OUT/office_trajectory_recorder_est${EST}.log" 2>&1 &
+REC_PID=$!
+sleep 3
+kill -0 "$REC_PID" 2>/dev/null || { warn "轨迹记录器启动失败"; cat "$OUT/office_trajectory_recorder_est${EST}.log"; exit 4; }
+
 say "bag 话题体检"
 rosbag info "$BAG" 2>&1 | head -45 || true
 
@@ -217,6 +225,8 @@ for _ in $(seq 1 90); do
   sleep 2
 done
 kill "$NODE_PID" 2>/dev/null || true
+sleep 1
+kill "$REC_PID"  2>/dev/null || true
 kill "$RC_PID"   2>/dev/null || true
 
 say "结果"
@@ -227,6 +237,13 @@ if [ -f "$CSV" ] && [ "$(wc -l < "$CSV")" -gt 1 ]; then
 else
   warn "没有生成 CSV（或用例数为 0）"
   RC=9
+fi
+if [ -f "$TRAJ" ] && [ "$(wc -l < "$TRAJ")" -gt 1 ]; then
+  echo "轨迹位姿数 = $(( $(wc -l < "$TRAJ") - 1 ))"
+  head -3 "$TRAJ"
+else
+  warn "没有生成轨迹 CSV"
+  RC=10
 fi
 echo "---------- 节点日志末尾 ----------"
 tail -25 "$OUT/office_node_est${EST}.log" 2>/dev/null || true
